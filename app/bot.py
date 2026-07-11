@@ -99,6 +99,20 @@ async def safe_edit(chat_id: int, message_id: int, text: str) -> None:
         await asyncio.sleep(e.value + 1)
 
 
+def format_size(size_bytes: float) -> str:
+    for unit in ["B", "KB", "MB", "GB", "TB"]:
+        if size_bytes < 1024.0:
+            return f"{size_bytes:.1f} {unit}"
+        size_bytes /= 1024.0
+    return f"{size_bytes:.1f} PB"
+
+
+def make_progress_bar(pct: float) -> str:
+    filled = int(round(pct / 10))
+    bar = "■" * filled + "□" * (10 - filled)
+    return bar
+
+
 async def process_job(job: Job) -> None:
     global _current_job_id
     _current_job_id = job.id
@@ -119,8 +133,18 @@ async def process_job(job: Job) -> None:
 
     current_upload_file: str | None = None
     current_upload_pct: float = 0.0
+    upload_speed: float = 0.0
+    last_uploaded_bytes = 0
     last_progress_edit = 0.0
+    last_upload_speed_time = 0.0
     last_downloader_edit = 0.0
+
+    # For download size/speed tracking
+    total_downloaded_bytes = 0
+    download_speed = 0.0
+    last_download_size = 0
+    last_download_time = time.time()
+    deleted_bytes = 0
 
     status_lock = asyncio.Lock()
     downloader_done = asyncio.Event()
@@ -129,17 +153,37 @@ async def process_job(job: Job) -> None:
 
     async def update_status_msg() -> None:
         async with status_lock:
+            dl_size_str = format_size(total_downloaded_bytes)
+            dl_speed_str = format_size(download_speed)
+
             if downloader_done.is_set():
-                status_text = f"Uploading remaining files… {sent} sent, {len(skipped)} skipped."
+                status_text = (
+                    f"**Downloading complete!** (Total: **{dl_size_str}**)\n"
+                    f"**Uploading remaining files…**\n"
+                    f"   • **Sent:** `{sent}`\n"
+                    f"   • **Skipped:** `{len(skipped)}`"
+                )
             else:
                 status_text = (
-                    f"Downloading & Uploading…\n"
-                    f"Processed ~{download_count} items.\n"
-                    f"Uploaded: {sent} sent, {len(skipped)} skipped."
+                    f"**Downloading & Uploading…**\n\n"
+                    f"**Downloader Status:**\n"
+                    f"   • **Processed:** ~`{download_count}` items\n"
+                    f"   • **Size:** `{dl_size_str}`\n"
+                    f"   • **Speed:** `{dl_speed_str}/s`\n\n"
+                    f"**Uploader Status:**\n"
+                    f"   • **Sent:** `{sent}`\n"
+                    f"   • **Skipped:** `{len(skipped)}`"
                 )
 
             if current_upload_file:
-                status_text += f"\n\nUploading current file:\n`{current_upload_file}`\nProgress: {current_upload_pct:.1f}%"
+                up_speed_str = format_size(upload_speed)
+                bar = make_progress_bar(current_upload_pct)
+                status_text += (
+                    f"\n\n**Current Upload:**\n"
+                    f"   • **File:** `{current_upload_file}`\n"
+                    f"   • **Progress:** `{current_upload_pct:.1f}%` `[{bar}]`\n"
+                    f"   • **Speed:** `{up_speed_str}/s`"
+                )
 
             await report(status_text)
 
@@ -153,11 +197,21 @@ async def process_job(job: Job) -> None:
             asyncio.create_task(update_status_msg())
 
     async def on_upload_progress(current: int, total: int) -> None:
-        nonlocal current_upload_pct, last_progress_edit
+        nonlocal current_upload_pct, last_progress_edit, upload_speed, last_uploaded_bytes, last_upload_speed_time
         if total == 0:
             return
         pct = current * 100.0 / total
         now = time.time()
+
+        # Calculate upload speed
+        dt = now - last_upload_speed_time
+        if dt >= 1.0 or last_upload_speed_time == 0.0:
+            bytes_diff = current - last_uploaded_bytes
+            speed = bytes_diff / dt if dt > 0 else 0.0
+            upload_speed = 0.7 * speed + 0.3 * upload_speed if last_uploaded_bytes > 0 else speed
+            last_uploaded_bytes = current
+            last_upload_speed_time = now
+
         # Edit progress message at most once every 3.0 seconds, or if finished/significant jump
         if pct - current_upload_pct >= 10.0 or now - last_progress_edit >= 3.0 or current == total:
             current_upload_pct = pct
@@ -172,8 +226,36 @@ async def process_job(job: Job) -> None:
         finally:
             downloader_done.set()
 
+    async def monitor_download_speed():
+        nonlocal total_downloaded_bytes, download_speed, last_download_size, last_download_time
+        try:
+            while not downloader_done.is_set():
+                if not dest_dir.exists():
+                    await asyncio.sleep(2)
+                    continue
+
+                try:
+                    on_disk = sum(p.stat().st_size for p in dest_dir.rglob("*") if p.is_file())
+                    current_size = on_disk + deleted_bytes
+                except Exception:
+                    current_size = last_download_size
+
+                now = time.time()
+                dt = now - last_download_time
+                if dt >= 1.0:
+                    speed = (current_size - last_download_size) / dt
+                    download_speed = 0.7 * speed + 0.3 * download_speed if last_download_size > 0 else speed
+                    last_download_size = current_size
+                    last_download_time = now
+                    total_downloaded_bytes = current_size
+
+                await asyncio.sleep(2)
+        except asyncio.CancelledError:
+            pass
+
     async def perform_uploads() -> None:
         nonlocal sent, session_uploaded_count, current_upload_file, current_upload_pct, last_progress_edit
+        nonlocal upload_speed, last_uploaded_bytes, last_upload_speed_time, deleted_bytes
         if not dest_dir.exists():
             return
 
@@ -204,6 +286,9 @@ async def process_job(job: Job) -> None:
 
                 current_upload_file = f.name
                 current_upload_pct = 0.0
+                upload_speed = 0.0
+                last_uploaded_bytes = 0
+                last_upload_speed_time = time.time()
                 last_progress_edit = time.time()
                 await update_status_msg()
 
@@ -217,7 +302,9 @@ async def process_job(job: Job) -> None:
 
                 # Cleanup file immediately after successful upload to avoid storage issues
                 try:
+                    f_size = f.stat().st_size
                     f.unlink(missing_ok=True)
+                    deleted_bytes += f_size
                 except Exception:
                     log.exception("Failed to delete file after upload: %s", f)
 
@@ -230,6 +317,7 @@ async def process_job(job: Job) -> None:
             finally:
                 current_upload_file = None
                 current_upload_pct = 0.0
+                upload_speed = 0.0
                 if f.name in uploading_files:
                     uploading_files.remove(f.name)
 
@@ -264,11 +352,13 @@ async def process_job(job: Job) -> None:
                 if _shutdown_event.is_set():
                     downloader_task.cancel()
                     uploader_task.cancel()
+                    monitor_task.cancel()
                     break
                 db_job = await store.get_job(job.id)
                 if db_job and db_job.status == JobStatus.CANCELLED:
                     downloader_task.cancel()
                     uploader_task.cancel()
+                    monitor_task.cancel()
                     break
                 await asyncio.sleep(2)
         except asyncio.CancelledError:
@@ -276,6 +366,7 @@ async def process_job(job: Job) -> None:
 
     downloader_task = asyncio.create_task(run_downloader())
     uploader_task = asyncio.create_task(run_uploader())
+    monitor_task = asyncio.create_task(monitor_download_speed())
     cancellation_task = asyncio.create_task(check_cancellation())
 
     try:
@@ -288,7 +379,8 @@ async def process_job(job: Job) -> None:
         log.info("Job %s was cancelled/aborted", job.id)
         downloader_task.cancel()
         uploader_task.cancel()
-        await asyncio.gather(downloader_task, uploader_task, return_exceptions=True)
+        monitor_task.cancel()
+        await asyncio.gather(downloader_task, uploader_task, monitor_task, return_exceptions=True)
 
         db_job = await store.get_job(job.id)
         if _shutdown_event.is_set() or (db_job and db_job.status == JobStatus.QUEUED):
@@ -309,8 +401,9 @@ async def process_job(job: Job) -> None:
         await report(f"Job failed with an unexpected error: {e}")
         return
     finally:
+        monitor_task.cancel()
         cancellation_task.cancel()
-        await asyncio.gather(cancellation_task, return_exceptions=True)
+        await asyncio.gather(monitor_task, cancellation_task, return_exceptions=True)
         _current_job_id = None
 
     # Final cleanup and report for successful run
