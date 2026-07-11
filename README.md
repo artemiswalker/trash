@@ -96,15 +96,19 @@ Simply send a media album or video URL to the bot in a chat.
   * **Split**: Large videos are segmented into playable sub-2GB clips using `ffmpeg` copy mode; documents are split into multi-part chunks.
   * **Skip**: The file is deleted from the host and skipped.
 
-### Custom gallery-dl Arguments
-You can append custom `gallery-dl` arguments directly after the link URL inside your message. Options containing spaces should be enclosed in quotes:
-* **Example (Multiple pages)**:
+### Custom gallery-dl Arguments & Shorthands
+You can append custom `gallery-dl` arguments directly after the link URL inside your message. Options containing spaces should be enclosed in quotes.
+* **Shorthand Option (Recommended)**: Simply pass `option=value`. The bot automatically extracts the domain name from the URL to map it to the correct extractor option (e.g., `pages=1-16` or `post_type=video`).
+  ```text
+  https://example.com/album/aabbbccdd pages=1-16
+  ```
+* **Explicit Shorthand**: Specifying the target extractor module explicitly via `extractor:option=value`:
+  ```text
+  https://example.com/album/aabbbccdd example:pages=1-16
+  ```
+* **Full Syntax Option**: You can also use standard command-line options if preferred:
   ```text
   https://example.com/album/aabbbccdd --extractor-argument example:pages=1-16
-  ```
-* **Example (Chapter range)**:
-  ```text
-  https://example.com/album --range 1-10
   ```
 > [!NOTE]
 > Options that modify directory layout, output paths, or system config (`-d`, `--directory`, `-o base-directory=...`, `--config`, `-h`, `--help`, `--version`) are automatically stripped out to protect the bot's filesystem.

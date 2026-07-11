@@ -523,11 +523,18 @@ async def worker_loop() -> None:
 
 @app.on_message(filters.command("start"))
 async def start_cmd(_, message: Message) -> None:
-    await message.reply_text(
-        "Send me a link and I'll fetch it with gallery-dl and upload the results here.\n"
-        "Large albums are throttled to avoid rate limits — I'll post progress as I go.\n\n"
-        "Commands: /status, /cancel"
+    text = (
+        "Send me a link to download media files (e.g., videos, photo albums) and upload them to Telegram.\n\n"
+        "**Usage:**\n"
+        "• Send a URL: `https://example.com/album`\n"
+        "• Set custom options (shorthand): `https://example.com/album pages=1-16`\n\n"
+        "**Commands:**\n"
+        "• /status — View active download/upload metrics or queued jobs.\n"
+        "• /cancel — Cancel the active task and clean up temporary storage.\n\n"
+        "**Large Files:**\n"
+        "• If a file exceeds 1.95GB, you will be prompted to either split it into sub-2GB playable segment files or skip it."
     )
+    await message.reply_text(text, disable_web_page_preview=True)
 
 
 @app.on_message(filters.command("status"))
@@ -645,10 +652,65 @@ async def cancel_cmd(_, message: Message) -> None:
     )
 
 
-def sanitize_gdl_args(args: list[str]) -> list[str]:
+def extract_domain_name(url: str) -> str:
+    from urllib.parse import urlparse
+    try:
+        netloc = urlparse(url).netloc.lower()
+        if not netloc:
+            return "generic"
+        if ":" in netloc:
+            netloc = netloc.split(":")[0]
+        parts = netloc.split(".")
+        if len(parts) >= 3 and parts[-2] in ("co", "com", "org", "net", "gov", "edu", "ac"):
+            return parts[-3]
+        if len(parts) >= 2:
+            return parts[-2]
+        return parts[0]
+    except Exception:
+        return "generic"
+
+
+def sanitize_gdl_args(args: list[str], url: Optional[str] = None) -> list[str]:
     sanitized = []
     skip_next = False
-    for i, arg in enumerate(args):
+
+    # Rewrite shorthand arguments and --extractor-argument to standard -o option
+    rewritten_args = []
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--extractor-argument" and i + 1 < len(args):
+            val = args[i + 1]
+            if ":" in val:
+                parts_colon = val.split(":", 1)
+                extractor = parts_colon[0]
+                rest = parts_colon[1]
+                rewritten_args.append("-o")
+                rewritten_args.append(f"extractor.{extractor}.{rest}")
+            else:
+                rewritten_args.append("-o")
+                if val.startswith("extractor."):
+                    rewritten_args.append(val)
+                else:
+                    rewritten_args.append(f"extractor.{val}")
+            i += 2
+        elif not arg.startswith("-") and "=" in arg:
+            if ":" in arg:
+                parts_colon = arg.split(":", 1)
+                extractor = parts_colon[0]
+                rest = parts_colon[1]
+                rewritten_args.append("-o")
+                rewritten_args.append(f"extractor.{extractor}.{rest}")
+            else:
+                extractor = extract_domain_name(url) if url else "generic"
+                rewritten_args.append("-o")
+                rewritten_args.append(f"extractor.{extractor}.{arg}")
+            i += 1
+        else:
+            rewritten_args.append(arg)
+            i += 1
+
+    for idx, arg in enumerate(rewritten_args):
         if skip_next:
             skip_next = False
             continue
@@ -664,8 +726,8 @@ def sanitize_gdl_args(args: list[str]) -> list[str]:
 
         # If it is -o or --option, check the value
         if arg in ("-o", "--option"):
-            if i + 1 < len(args):
-                val = args[i + 1]
+            if idx + 1 < len(rewritten_args):
+                val = rewritten_args[idx + 1]
                 # If it tries to set base-directory, skip both
                 if "base-directory" in val or "directory" in val or "path" in val:
                     skip_next = True
@@ -701,7 +763,7 @@ async def handle_link(_, message: Message) -> None:
             await message.reply_text("Send an actual URL.")
         return
 
-    sanitized_args = sanitize_gdl_args(raw_args)
+    sanitized_args = sanitize_gdl_args(raw_args, url)
     args_json = json.dumps(sanitized_args) if sanitized_args else None
 
     # Create job in "waiting" status
