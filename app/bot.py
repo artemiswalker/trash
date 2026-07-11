@@ -10,7 +10,7 @@ from pathlib import Path
 
 from pyrogram import Client, filters, idle
 from pyrogram.enums import ChatType
-from pyrogram.types import Message, CallbackQuery
+from pyrogram.types import Message, CallbackQuery, LinkPreviewOptions
 
 from .config import settings
 from .db import Job, JobStatus, JobStore
@@ -104,7 +104,7 @@ async def safe_edit(chat_id: int, message_id: int, text: str) -> None:
     from pyrogram.errors import FloodWait, MessageNotModified
 
     try:
-        await app.edit_message_text(chat_id, message_id, text, disable_web_page_preview=True)
+        await app.edit_message_text(chat_id, message_id, text, link_preview_options=LinkPreviewOptions(is_disabled=True))
     except MessageNotModified:
         pass
     except FloodWait as e:
@@ -499,7 +499,7 @@ async def process_job(job: Job) -> None:
         preview = "\n".join(f"- {n} ({info})" for n, info in skipped[:20])
         more = f"\n…and {len(skipped) - 20} more" if len(skipped) > 20 else ""
         summary += f"\nSkipped:\n{preview}{more}"
-    await app.send_message(chat_id, summary, disable_web_page_preview=True)
+    await app.send_message(chat_id, summary, link_preview_options=LinkPreviewOptions(is_disabled=True))
 
     # cleanup: remove local directory once everyone is accounted for
     shutil.rmtree(dest_dir, ignore_errors=True)
@@ -534,7 +534,7 @@ async def start_cmd(_, message: Message) -> None:
         "**Large Files:**\n"
         "• If a file exceeds 1.95GB, you will be prompted to either split it into sub-2GB playable segment files or skip it."
     )
-    await message.reply_text(text, disable_web_page_preview=True)
+    await message.reply_text(text, link_preview_options=LinkPreviewOptions(is_disabled=True))
 
 
 @app.on_message(filters.command("status"))
@@ -597,7 +597,7 @@ async def status_cmd(_, message: Message) -> None:
                     f"- **Upload Speed**: {ul_speed_str}/s\n"
                 )
 
-            await message.reply_text(status_text, disable_web_page_preview=True)
+            await message.reply_text(status_text, link_preview_options=LinkPreviewOptions(is_disabled=True))
             return
 
     # Check for waiting/queued jobs
@@ -638,7 +638,7 @@ async def status_cmd(_, message: Message) -> None:
         if len(waiting) > 5:
             response += f"\n…and {len(waiting) - 5} more awaiting confirmation"
 
-    await message.reply_text(response, disable_web_page_preview=True)
+    await message.reply_text(response, link_preview_options=LinkPreviewOptions(is_disabled=True))
 
 
 @app.on_message(filters.command("cancel"))
@@ -788,7 +788,7 @@ async def handle_link(_, message: Message) -> None:
     status_msg = await message.reply_text(
         prompt_text,
         reply_markup=keyboard,
-        disable_web_page_preview=True
+        link_preview_options=LinkPreviewOptions(is_disabled=True)
     )
     await store.set_status_message(job.id, status_msg.id)
 
@@ -829,7 +829,7 @@ async def handle_split_choice(_, callback_query: CallbackQuery) -> None:
         f"**Queued (job #{job_id})**\n"
         f"- **URL**: {job.url}{args_display}"
     )
-    await callback_query.message.edit_text(status_text, disable_web_page_preview=True)
+    await callback_query.message.edit_text(status_text, link_preview_options=LinkPreviewOptions(is_disabled=True))
     await callback_query.answer("Choice registered.")
 
     # Put the job on queue
