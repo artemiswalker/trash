@@ -1,9 +1,3 @@
-"""
-Centralized, validated configuration. All tunables live here and are
-overridable via environment variables or a .env file — nothing is
-hardcoded deeper in the app.
-"""
-
 from __future__ import annotations
 
 from pathlib import Path

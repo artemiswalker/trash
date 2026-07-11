@@ -1,11 +1,3 @@
-"""
-Handles uploading a single file to Telegram via Kurigram with:
-  - automatic FloodWait handling (sleep exactly as long as told)
-  - bounded retries with backoff for transient errors
-  - a concurrency semaphore (default 1 — Telegram punishes parallel
-    uploads from one bot much harder than sequential ones)
-"""
-
 from __future__ import annotations
 
 import asyncio

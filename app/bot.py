@@ -1,9 +1,3 @@
-"""
-Main entrypoint. A single background worker processes jobs one at a time
-(bunkr and Telegram both punish concurrency), persisting progress to
-SQLite so a crash or redeploy mid-1600-file-album resumes cleanly.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -388,23 +382,6 @@ async def _startup() -> None:
 
 
 async def main() -> None:
-    """
-    Kurigram/Pyrogram's Client binds to whatever event loop exists at
-    construction time (module import, for `app` above). Calling
-    asyncio.run() here would spin up a second, unrelated loop and every
-    Pyrogram internal await would be attached to the wrong one — that's
-    the 'attached to a different loop' crash. Calling app.start()/stop()
-    from plain sync code has its own footgun: Pyrogram's sync-mode
-    patching detects "no running loop" and executes them immediately,
-    returning the Client itself rather than a coroutine, which breaks
-    manual run_until_complete() calls.
-
-    Both problems disappear by keeping this as a genuine `async def` and
-    launching it with `app.run(main())` at the bottom of the file —
-    Pyrogram's run() reuses its own existing loop instead of creating a
-    new one, and `await app.start()` inside a real async context behaves
-    as a normal coroutine.
-    """
     setup_logging()
 
     if shutil.which("gallery-dl") is None:
@@ -431,13 +408,4 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    # Not asyncio.run() — it unconditionally creates a brand-new event loop,
-    # which is what caused the original 'attached to a different loop'
-    # crash (the Client had already bound itself to the default loop at
-    # construction). get_event_loop() reuses that same default loop instead.
-    #
-    # Not app.run(main()) either — Kurigram's run() (unlike upstream
-    # Pyrogram) doesn't accept a coroutine argument; passing one raises
-    # TypeError. Driving the loop ourselves sidesteps that fork difference
-    # entirely.
     asyncio.get_event_loop().run_until_complete(main())

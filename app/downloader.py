@@ -1,12 +1,3 @@
-"""
-Runs gallery-dl as a subprocess with:
-  - streaming stdout parsing, so callers get live progress instead of
-    waiting for the whole album to finish
-  - a download archive (skip-already-fetched) for resumability
-  - adaptive backoff + retry at the whole-run level when output looks
-    like a rate-limit/block response
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -50,8 +41,6 @@ def _build_cmd(url: str, dest_dir: Path, archive_file: Path) -> list[str]:
 
 
 async def _stream_run(cmd: list[str]) -> tuple[int, str, Callable[[], int]]:
-    """Run a subprocess, yielding a live count of '# ' download lines seen
-    in stdout via the returned counter callback. Returns (returncode, stderr_tail)."""
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
@@ -88,9 +77,6 @@ async def run_with_progress(
     archive_file: Path,
     on_progress: Optional[Callable[[int], None]] = None,
 ) -> DownloadResult:
-    """Run gallery-dl for `url`, retrying with backoff on rate-limit-shaped
-    failures. `on_progress` is called periodically with a running count of
-    lines processed (rough proxy for files touched) while it runs."""
 
     if shutil.which("gallery-dl") is None:
         raise GalleryDLNotFound(

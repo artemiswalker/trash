@@ -1,6 +1,3 @@
-"""Small adaptive-backoff helper: escalates wait time on repeated
-rate-limit-shaped failures, resets after a clean run."""
-
 from __future__ import annotations
 
 import re

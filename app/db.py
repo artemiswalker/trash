@@ -1,9 +1,3 @@
-"""
-Persistent job + per-file state, so a bot restart mid-1600-file album
-resumes instead of starting over. SQLite via aiosqlite keeps this
-dependency-light and file-based (fits a single-VPS deployment).
-"""
-
 from __future__ import annotations
 
 import time
