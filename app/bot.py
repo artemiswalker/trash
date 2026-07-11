@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 
 from pyrogram import Client, filters, idle
+from pyrogram.enums import ChatType
 from pyrogram.types import Message
 
 from .config import settings
@@ -389,8 +390,11 @@ async def cancel_cmd(_, message: Message) -> None:
 @app.on_message(filters.text & ~filters.command(["start", "status", "cancel"]))
 async def handle_link(_, message: Message) -> None:
     text = (message.text or "").strip()
+    is_private = message.chat.type == ChatType.PRIVATE
+
     if not text.startswith(("http://", "https://")):
-        await message.reply_text("Send an actual URL.")
+        if is_private:
+            await message.reply_text("Send an actual URL.")
         return
 
     job = await store.create_job(message.chat.id, text)
