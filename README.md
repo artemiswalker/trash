@@ -1,86 +1,126 @@
 # tgdl-bot
 
-Telegram bot that downloads links via `gallery-dl` and uploads the results
-back into the chat, using Kurigram (MTProto) for a 2GB upload ceiling
-instead of the 50MB HTTP Bot API limit.
+A Telegram bot that downloads media albums and videos via `gallery-dl` and uploads them back to your chat. Built on top of Kurigram (pyrogram fork) to bypass the 50MB HTTP Bot API limit and support up to 2GB uploads.
 
-## Features
+---
 
-- **Persistent job queue** (SQLite) — survives restarts. A 1600-file album
-  interrupted at file 800 resumes from 800, not 0.
-- **Two layers of resumability**: gallery-dl's own `--download-archive`
-  skips already-fetched source files; a separate `uploaded_files` table
-  skips already-uploaded files, independently.
-- **Adaptive backoff** on gallery-dl runs — if output looks like a
-  rate-limit/block response (429/403/"too many requests"), the bot backs
-  off exponentially and retries instead of failing outright.
-- **Paced uploads** with jittered delays, batch cooldowns, and automatic
-  `FloodWait` handling.
-- **Live progress** during both download and upload phases, throttled so
-  status edits themselves don't trip rate limits.
-- **/status** and **/cancel** commands.
-- **Graceful shutdown** — SIGTERM/SIGINT finishes the current file, marks
-  the job for resume, and exits cleanly (important for `systemctl restart`
-  or container redeploys mid-job).
+## Key Features
 
-## Setup
+### Performance & Concurrency
+* **Parallel Pipeline**: Downloads and uploads run concurrently. Uploader task processes completed files while the downloader is still fetching remaining album content.
+* **Storage Protection**: Uploaded files are immediately deleted from disk.
+* **Startup Pruning**: Obsolete folders from interrupted downloads are automatically cleaned on startup.
 
-```bash
-cp .env.example .env
-# edit .env: TG_API_ID / TG_API_HASH from https://my.telegram.org,
-# TG_BOT_TOKEN from @BotFather
+### Live Tracking & Status
+* **Dynamic Status Updates**: A live text status dashboard tracking downloader progress (items, sizes, and speed) and active upload progress.
+* **Visual Progress Bar**: Monospace block bar `[■■■■■□□□□□]` tracking upload progress.
+* **Paced Uploads**: Automatic FloodWait handling, batch cooldowns, and randomized delay jitter to prevent Telegram rate limits.
 
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
+### Advanced Media Handling
+* **Grouped Albums**: Generates 9 random screenshots across the video timeline and uploads them together with the video in a single 10-item Telegram album.
+* **Metadata Probing**: Uses `ffprobe` to determine video dimensions and duration, ensuring streamable playback and thumbnail rendering.
+* **Automatic Captions**: Places the file name in the caption of each upload.
 
-Run directly:
+### Chat Integrations
+* **Group Chat Optimization**: Silently ignores non-URL chatter in group, supergroup, and channel chats, keeping prompts strictly for private DMs.
+* **Resumability**: Leverages `gallery-dl` download archive and an SQLite state store to avoid duplicate downloads and duplicate uploads.
+* **Graceful Shutdown**: SIGINT/SIGTERM finishes the current file, marks unfinished work as queued, and exits cleanly.
 
-```bash
-python -m app.bot
-```
+---
+
+## Setup & Installation
+
+### Prerequisites
+* Python 3.12+
+* `ffmpeg` and `ffprobe` (for screenshot extraction and metadata probing)
+
+### Local Run
+
+1. Copy the environment template:
+   ```bash
+   cp .env.example .env
+   ```
+2. Configure credentials in `.env` (`TG_API_ID` & `TG_API_HASH` from my.telegram.org; `TG_BOT_TOKEN` from @BotFather).
+3. Install dependencies:
+   ```bash
+   python3 -m venv .venv
+   source .venv/bin/activate
+   pip install -r requirements.txt
+   ```
+4. Run the bot:
+   ```bash
+   python -m app.bot
+   ```
+
+---
 
 ## Deployment
 
 ### Docker
-
+Run via Docker Compose:
 ```bash
 docker compose up -d --build
 docker compose logs -f
 ```
 
-### systemd (bare metal / VPS)
-
+### systemd (VPS / Linux Host)
 ```bash
+# 1. Create system user
 sudo useradd -r -m -d /opt/tgdl-bot tgdlbot
+
+# 2. Copy source files
 sudo cp -r . /opt/tgdl-bot
 cd /opt/tgdl-bot
+
+# 3. Create virtual environment and install packages
 sudo -u tgdlbot python3 -m venv .venv
 sudo -u tgdlbot .venv/bin/pip install -r requirements.txt
+
+# 4. Set up the service
 sudo cp tgdl-bot.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now tgdl-bot
+
+# 5. Monitor service
 sudo journalctl -u tgdl-bot -f
 ```
 
-## Tuning
+---
 
-Everything is in `.env` / `app/config.py`:
+## Bot Commands
 
-- `GDL_SLEEP_MIN/MAX`, `GDL_LIMIT_RATE` — how gently gallery-dl treats the
-  source site. Loosen once you've confirmed the site tolerates it.
-- `GDL_MAX_RUN_RETRIES`, `GDL_BACKOFF_BASE_S` — how the bot reacts to
-  rate-limit signals from the source.
-- `TG_UPLOAD_DELAY_MIN/MAX`, `TG_BATCH_SIZE`, `TG_BATCH_COOLDOWN_S` —
-  Telegram-side upload pacing.
-- `TG_MAX_CONCURRENT_UPLOADS` — leave at 1 unless you've tested that your
-  bot account tolerates parallel uploads without harsher flood limits.
+* `/start` — Send welcome message and descriptions.
+* `/status` — View active job details or queue status.
+* `/cancel` — Instantly abort the active job, prune working directories, and mark it cancelled.
 
-## Notes
+---
 
-- Only fetch/redistribute content you actually have the rights to.
-- Kurigram and the original `pyrogram` package share the same import
-  namespace — don't install both in one environment.
-- The 2GB cap is the MTProto ceiling for bot accounts; nothing in this app
-  can raise that further.
+## Configuration Options
+
+Key configuration parameters in `.env` / `app/config.py`:
+
+| Parameter | Default | Description |
+| :--- | :--- | :--- |
+| `GDL_SLEEP_MIN` / `GDL_SLEEP_MAX` | `1.0` / `4.0` | Random delay range for gallery-dl extraction to avoid IP blocks. |
+| `GDL_MAX_RUN_RETRIES` | `3` | Maximum attempts allowed for downloader run. |
+| `GDL_BACKOFF_BASE_S` | `30` | Exponential backoff delay when rate-limited. |
+| `TG_UPLOAD_DELAY_MIN` / `TG_UPLOAD_DELAY_MAX` | `1.0` / `3.0` | Jitter spacing between Telegram file uploads. |
+| `TG_BATCH_SIZE` | `10` | Number of files sent in one batch before pausing. |
+| `TG_BATCH_COOLDOWN_S` | `15` | Delay time in seconds applied between upload batches. |
+| `TG_MAX_CONCURRENT_UPLOADS` | `1` | Maximum parallel upload tasks allowed inside MTProto client. |
+
+---
+
+## Important Notes
+
+> [!IMPORTANT]
+> **Namespace Conflicts**: Kurigram and the standard `pyrogram` library share the same import namespace. Do not install both packages in the same Python environment.
+
+> [!WARNING]
+> **MTProto Bot Limits**: The 2GB upload limit is a strict Telegram MTProto protocol limit for bot accounts. It cannot be bypassed further unless you have a premium account.
+
+---
+
+## Credits
+
+* Assisted by Gemini and Claude.
