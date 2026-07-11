@@ -158,7 +158,8 @@ async def process_job(job: Job) -> None:
     last_uploaded_bytes = 0
     last_progress_edit = 0.0
     last_upload_speed_time = 0.0
-    last_downloader_edit = 0.0
+    last_edit_time = 0.0
+    edit_pending = False
 
     # For download size/speed tracking
     total_downloaded_bytes = 0
@@ -172,7 +173,8 @@ async def process_job(job: Job) -> None:
     uploader_done = asyncio.Event()
     download_count = 0
 
-    async def update_status_msg() -> None:
+    async def perform_status_edit() -> None:
+        nonlocal last_edit_time
         async with status_lock:
             dl_size_str = format_size(total_downloaded_bytes)
             dl_speed_str = format_size(download_speed)
@@ -219,21 +221,50 @@ async def process_job(job: Job) -> None:
                 )
 
             await report(status_text)
+            last_edit_time = time.time()
+
+    async def scheduled_status_edit(delay: float) -> None:
+        nonlocal edit_pending
+        await asyncio.sleep(delay)
+        try:
+            await perform_status_edit()
+        finally:
+            edit_pending = False
+
+    async def update_status_msg(force: bool = False) -> None:
+        nonlocal last_edit_time, edit_pending
+        if force:
+            await perform_status_edit()
+            return
+
+        if edit_pending:
+            return
+
+        now = time.time()
+        elapsed = now - last_edit_time
+        cooldown = 10.0
+
+        if elapsed >= cooldown:
+            edit_pending = True
+            try:
+                await perform_status_edit()
+            finally:
+                edit_pending = False
+        else:
+            edit_pending = True
+            delay = cooldown - elapsed
+            asyncio.create_task(scheduled_status_edit(delay))
 
     def on_progress(count: int, filename: Optional[str] = None) -> None:
-        nonlocal download_count, last_downloader_edit
+        nonlocal download_count
         download_count = count
         _active_job_metrics["download_count"] = count
         if filename:
             _active_job_metrics["current_download_file"] = filename
-        now = time.time()
-        # Rate limit status edits during download to at most once every 3.0 seconds
-        if now - last_downloader_edit >= 3.0:
-            last_downloader_edit = now
-            asyncio.create_task(update_status_msg())
+        asyncio.create_task(update_status_msg())
 
     async def on_upload_progress(current: int, total: int) -> None:
-        nonlocal current_upload_pct, last_progress_edit, upload_speed, last_uploaded_bytes, last_upload_speed_time
+        nonlocal current_upload_pct, upload_speed, last_uploaded_bytes, last_upload_speed_time
         if total == 0:
             return
         pct = current * 100.0 / total
@@ -249,13 +280,10 @@ async def process_job(job: Job) -> None:
             last_upload_speed_time = now
             _active_job_metrics["upload_speed"] = upload_speed
 
+        current_upload_pct = pct
         _active_job_metrics["current_upload_pct"] = pct
 
-        # Edit progress message at most once every 3.0 seconds, or if finished/significant jump
-        if pct - current_upload_pct >= 10.0 or now - last_progress_edit >= 3.0 or current == total:
-            current_upload_pct = pct
-            last_progress_edit = now
-            await update_status_msg()
+        await update_status_msg()
 
     async def run_downloader():
         try:
@@ -337,7 +365,7 @@ async def process_job(job: Job) -> None:
                 if not split_parts:
                     skipped.append((f.name, "File exceeds 1.95GB limit and was skipped"))
                     await store.update_progress(job.id, sent_files=sent, skipped_files=len(skipped))
-                    await update_status_msg()
+                    await update_status_msg(force=True)
                     continue
                 # Append split parts to pending list to process in the current run
                 for part in split_parts:
@@ -354,11 +382,10 @@ async def process_job(job: Job) -> None:
                 upload_speed = 0.0
                 last_uploaded_bytes = 0
                 last_upload_speed_time = time.time()
-                last_progress_edit = time.time()
                 _active_job_metrics["current_upload_file"] = f.name
                 _active_job_metrics["current_upload_pct"] = 0.0
                 _active_job_metrics["upload_speed"] = 0.0
-                await update_status_msg()
+                await update_status_msg(force=True)
 
                 await upload_file(app, chat_id, f, progress=on_upload_progress)
                 await store.mark_uploaded(job.id, f.name)
@@ -445,6 +472,7 @@ async def process_job(job: Job) -> None:
         await report(f"Downloading:\n{job.url}\n(rate-limited, large albums take a while)")
 
         result = await downloader_task
+        await update_status_msg(force=True)
         await uploader_task
     except asyncio.CancelledError:
         log.info("Job %s was cancelled/aborted", job.id)
