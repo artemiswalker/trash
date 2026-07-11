@@ -94,7 +94,7 @@ async def safe_edit(chat_id: int, message_id: int, text: str) -> None:
     from pyrogram.errors import FloodWait, MessageNotModified
 
     try:
-        await app.edit_message_text(chat_id, message_id, text)
+        await app.edit_message_text(chat_id, message_id, text, disable_web_page_preview=True)
     except MessageNotModified:
         pass
     except FloodWait as e:
@@ -454,7 +454,7 @@ async def process_job(job: Job) -> None:
         preview = "\n".join(f"- {n} ({info})" for n, info in skipped[:20])
         more = f"\n…and {len(skipped) - 20} more" if len(skipped) > 20 else ""
         summary += f"\nSkipped:\n{preview}{more}"
-    await app.send_message(chat_id, summary)
+    await app.send_message(chat_id, summary, disable_web_page_preview=True)
 
     # cleanup: remove local directory once everyone is accounted for
     shutil.rmtree(dest_dir, ignore_errors=True)
@@ -586,7 +586,8 @@ async def handle_link(_, message: Message) -> None:
     )
     status_msg = await message.reply_text(
         prompt_text,
-        reply_markup=keyboard
+        reply_markup=keyboard,
+        disable_web_page_preview=True
     )
     await store.set_status_message(job.id, status_msg.id)
 
@@ -627,7 +628,7 @@ async def handle_split_choice(_, callback_query: CallbackQuery) -> None:
         f"**Queued (job #{job_id})**\n"
         f"- **URL**: {job.url}{args_display}"
     )
-    await callback_query.message.edit_text(status_text)
+    await callback_query.message.edit_text(status_text, disable_web_page_preview=True)
     await callback_query.answer("Choice registered.")
 
     # Put the job on queue
