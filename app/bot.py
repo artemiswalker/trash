@@ -53,6 +53,15 @@ job_queue: asyncio.Queue[int] = asyncio.Queue()
 _shutdown_event = asyncio.Event()
 _current_job_id: int | None = None
 
+_active_job_metrics: dict[str, any] = {
+    "download_speed": 0.0,
+    "upload_speed": 0.0,
+    "current_upload_file": None,
+    "current_upload_pct": 0.0,
+    "total_downloaded_bytes": 0,
+    "download_count": 0,
+}
+
 
 async def log_upload(job_id: int, filename: str) -> None:
     log_path = settings.log_dir / "uploads.log"
@@ -118,6 +127,14 @@ def make_progress_bar(pct: float) -> str:
 async def process_job(job: Job) -> None:
     global _current_job_id
     _current_job_id = job.id
+    _active_job_metrics.update({
+        "download_speed": 0.0,
+        "upload_speed": 0.0,
+        "current_upload_file": None,
+        "current_upload_pct": 0.0,
+        "total_downloaded_bytes": 0,
+        "download_count": 0,
+    })
     chat_id = job.chat_id
     msg_id = job.status_message_id
     dest_dir = settings.downloads_dir / job.download_dir
@@ -192,6 +209,7 @@ async def process_job(job: Job) -> None:
     def on_progress(count: int) -> None:
         nonlocal download_count, last_downloader_edit
         download_count = count
+        _active_job_metrics["download_count"] = count
         now = time.time()
         # Rate limit status edits during download to at most once every 3.0 seconds
         if now - last_downloader_edit >= 3.0:
@@ -213,6 +231,9 @@ async def process_job(job: Job) -> None:
             upload_speed = 0.7 * speed + 0.3 * upload_speed if last_uploaded_bytes > 0 else speed
             last_uploaded_bytes = current
             last_upload_speed_time = now
+            _active_job_metrics["upload_speed"] = upload_speed
+
+        _active_job_metrics["current_upload_pct"] = pct
 
         # Edit progress message at most once every 3.0 seconds, or if finished/significant jump
         if pct - current_upload_pct >= 10.0 or now - last_progress_edit >= 3.0 or current == total:
@@ -258,6 +279,8 @@ async def process_job(job: Job) -> None:
                     last_download_size = current_size
                     last_download_time = now
                     total_downloaded_bytes = current_size
+                    _active_job_metrics["download_speed"] = download_speed
+                    _active_job_metrics["total_downloaded_bytes"] = total_downloaded_bytes
 
                 await asyncio.sleep(2)
         except asyncio.CancelledError:
@@ -316,6 +339,9 @@ async def process_job(job: Job) -> None:
                 last_uploaded_bytes = 0
                 last_upload_speed_time = time.time()
                 last_progress_edit = time.time()
+                _active_job_metrics["current_upload_file"] = f.name
+                _active_job_metrics["current_upload_pct"] = 0.0
+                _active_job_metrics["upload_speed"] = 0.0
                 await update_status_msg()
 
                 await upload_file(app, chat_id, f, progress=on_upload_progress)
@@ -344,6 +370,9 @@ async def process_job(job: Job) -> None:
                 current_upload_file = None
                 current_upload_pct = 0.0
                 upload_speed = 0.0
+                _active_job_metrics["current_upload_file"] = None
+                _active_job_metrics["current_upload_pct"] = 0.0
+                _active_job_metrics["upload_speed"] = 0.0
                 if f.name in uploading_files:
                     uploading_files.remove(f.name)
 
@@ -461,6 +490,7 @@ async def process_job(job: Job) -> None:
 
 
 async def worker_loop() -> None:
+    global _current_job_id
     while not _shutdown_event.is_set():
         try:
             job_id = await asyncio.wait_for(job_queue.get(), timeout=1.0)
@@ -469,7 +499,10 @@ async def worker_loop() -> None:
         job = await store.get_job(job_id)
         if job is None:
             continue
-        await process_job(job)
+        try:
+            await process_job(job)
+        finally:
+            _current_job_id = None
 
 
 @app.on_message(filters.command("start"))
@@ -483,16 +516,101 @@ async def start_cmd(_, message: Message) -> None:
 
 @app.on_message(filters.command("status"))
 async def status_cmd(_, message: Message) -> None:
+    import json
+
     if _current_job_id is not None:
         job = await store.get_job(_current_job_id)
         if job:
-            await message.reply_text(
-                f"Job #{job.id}: {job.status}\n"
-                f"{job.sent_files}/{job.total_files} sent, {job.skipped_files} skipped"
+            # Parse arguments
+            parsed_args = []
+            if job.args:
+                try:
+                    parsed_args = json.loads(job.args)
+                except Exception:
+                    pass
+            args_str = " ".join(parsed_args) if parsed_args else "None"
+            split_str = "Yes" if job.split_large_files else "No"
+
+            # Fetch live metrics
+            dl_speed = _active_job_metrics["download_speed"]
+            ul_speed = _active_job_metrics["upload_speed"]
+            dl_bytes = _active_job_metrics["total_downloaded_bytes"]
+            dl_count = _active_job_metrics["download_count"]
+            ul_pct = _active_job_metrics["current_upload_pct"]
+            ul_file = _active_job_metrics["current_upload_file"]
+
+            dl_speed_str = format_size(dl_speed)
+            ul_speed_str = format_size(ul_speed)
+            dl_bytes_str = format_size(dl_bytes)
+
+            # Build progress bar
+            bar = make_progress_bar(ul_pct)
+
+            status_text = (
+                f"**Active Job Status**\n"
+                f"- **Job ID**: #{job.id}\n"
+                f"- **Status**: `{job.status}`\n"
+                f"- **URL**: {job.url}\n"
+                f"- **Args**: `{args_str}`\n"
+                f"- **Split > 2GB**: {split_str}\n\n"
+                f"**Downloader Metrics**\n"
+                f"- **Files Downloaded**: {dl_count}\n"
+                f"- **Downloaded Size**: {dl_bytes_str}\n"
+                f"- **Download Speed**: {dl_speed_str}/s\n\n"
+                f"**Uploader Metrics**\n"
+                f"- **Files Sent**: {job.sent_files} / {job.total_files if job.total_files > 0 else 'Calculating'}\n"
+                f"- **Files Skipped**: {job.skipped_files}\n"
             )
+            if ul_file:
+                status_text += (
+                    f"- **Current File**: `{ul_file}`\n"
+                    f"- **Upload Progress**: {ul_pct:.1f}%\n"
+                    f"  `[{bar}]`\n"
+                    f"- **Upload Speed**: {ul_speed_str}/s\n"
+                )
+
+            await message.reply_text(status_text, disable_web_page_preview=True)
             return
+
+    # Check for waiting/queued jobs
     queued = await store.queued_jobs()
-    await message.reply_text(f"Nothing running. {len(queued)} job(s) queued." if queued else "Idle. No jobs queued.")
+
+    # Query waiting jobs directly
+    cur = await store.db.execute("SELECT * FROM jobs WHERE status = 'waiting' ORDER BY id")
+    waiting_rows = await cur.fetchall()
+    waiting = [store._row_to_job(r) for r in waiting_rows]
+
+    response = "**Bot Status: Idle**\nNo active download/upload task is currently running."
+
+    if queued:
+        response += f"\n\n**Queued Jobs ({len(queued)})**:"
+        for i, q_job in enumerate(queued[:5], 1):
+            q_parsed = []
+            if q_job.args:
+                try:
+                    q_parsed = json.loads(q_job.args)
+                except Exception:
+                    pass
+            q_args_str = f" (Args: `{' '.join(q_parsed)}`)" if q_parsed else ""
+            response += f"\n{i}. Job #{q_job.id}: {q_job.url}{q_args_str}"
+        if len(queued) > 5:
+            response += f"\n…and {len(queued) - 5} more queued job(s)"
+
+    if waiting:
+        response += f"\n\n**Awaiting Split Choice Confirmation ({len(waiting)})**:"
+        for i, w_job in enumerate(waiting[:5], 1):
+            w_parsed = []
+            if w_job.args:
+                try:
+                    w_parsed = json.loads(w_job.args)
+                except Exception:
+                    pass
+            w_args_str = f" (Args: `{' '.join(w_parsed)}`)" if w_parsed else ""
+            response += f"\n{i}. Job #{w_job.id}: {w_job.url}{w_args_str}"
+        if len(waiting) > 5:
+            response += f"\n…and {len(waiting) - 5} more awaiting confirmation"
+
+    await message.reply_text(response, disable_web_page_preview=True)
 
 
 @app.on_message(filters.command("cancel"))
