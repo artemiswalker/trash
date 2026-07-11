@@ -116,6 +116,11 @@ async def process_job(job: Job) -> None:
     skipped: list[tuple[str, str]] = []
     session_uploaded_count = 0
 
+    current_upload_file: str | None = None
+    current_upload_pct: float = 0.0
+    last_progress_edit = 0.0
+    last_downloader_edit = 0.0
+
     status_lock = asyncio.Lock()
     downloader_done = asyncio.Event()
     uploader_done = asyncio.Event()
@@ -124,20 +129,39 @@ async def process_job(job: Job) -> None:
     async def update_status_msg() -> None:
         async with status_lock:
             if downloader_done.is_set():
-                await report(
-                    f"Uploading remaining files… {sent} sent, {len(skipped)} skipped."
-                )
+                status_text = f"Uploading remaining files… {sent} sent, {len(skipped)} skipped."
             else:
-                await report(
+                status_text = (
                     f"Downloading & Uploading…\n"
                     f"Processed ~{download_count} items.\n"
                     f"Uploaded: {sent} sent, {len(skipped)} skipped."
                 )
 
+            if current_upload_file:
+                status_text += f"\n\nUploading current file:\n`{current_upload_file}`\nProgress: {current_upload_pct:.1f}%"
+
+            await report(status_text)
+
     def on_progress(count: int) -> None:
-        nonlocal download_count
+        nonlocal download_count, last_downloader_edit
         download_count = count
-        asyncio.create_task(update_status_msg())
+        now = time.time()
+        # Rate limit status edits during download to at most once every 3.0 seconds
+        if now - last_downloader_edit >= 3.0:
+            last_downloader_edit = now
+            asyncio.create_task(update_status_msg())
+
+    async def on_upload_progress(current: int, total: int) -> None:
+        nonlocal current_upload_pct, last_progress_edit
+        if total == 0:
+            return
+        pct = current * 100.0 / total
+        now = time.time()
+        # Edit progress message at most once every 3.0 seconds, or if finished/significant jump
+        if pct - current_upload_pct >= 10.0 or now - last_progress_edit >= 3.0 or current == total:
+            current_upload_pct = pct
+            last_progress_edit = now
+            await update_status_msg()
 
     async def run_downloader():
         try:
@@ -148,7 +172,7 @@ async def process_job(job: Job) -> None:
             downloader_done.set()
 
     async def perform_uploads() -> None:
-        nonlocal sent, session_uploaded_count
+        nonlocal sent, session_uploaded_count, current_upload_file, current_upload_pct, last_progress_edit
         if not dest_dir.exists():
             return
 
@@ -176,7 +200,13 @@ async def process_job(job: Job) -> None:
             uploading_files.add(f.name)
             try:
                 await store.update_progress(job.id, status=JobStatus.UPLOADING)
-                await upload_file(app, chat_id, f)
+
+                current_upload_file = f.name
+                current_upload_pct = 0.0
+                last_progress_edit = time.time()
+                await update_status_msg()
+
+                await upload_file(app, chat_id, f, progress=on_upload_progress)
                 await store.mark_uploaded(job.id, f.name)
 
                 uploaded_filenames.add(f.name)
@@ -197,6 +227,8 @@ async def process_job(job: Job) -> None:
                 log.exception("Upload failed for %s", f)
                 skipped.append((f.name, f"error: {e}"))
             finally:
+                current_upload_file = None
+                current_upload_pct = 0.0
                 if f.name in uploading_files:
                     uploading_files.remove(f.name)
 

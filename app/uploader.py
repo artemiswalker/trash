@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import shutil
+from collections.abc import Callable, Coroutine
 from pathlib import Path
 
 from pyrogram import Client
@@ -54,7 +55,12 @@ async def extract_video_thumbnail(video_path: Path) -> Path | None:
     return None
 
 
-async def upload_file(client: Client, chat_id: int, path: Path) -> None:
+async def upload_file(
+    client: Client,
+    chat_id: int,
+    path: Path,
+    progress: Callable[[int, int], Coroutine[None, None, None]] | None = None
+) -> None:
     size = path.stat().st_size
     if size > settings.max_upload_bytes:
         raise UploadTooLarge(f"{path.name} is {size / 1e9:.2f}GB, exceeds 2GB MTProto limit")
@@ -80,6 +86,8 @@ async def upload_file(client: Client, chat_id: int, path: Path) -> None:
                     kwargs = {"caption": path.name}
                     if thumb_path:
                         kwargs["thumb"] = str(thumb_path)
+                    if progress:
+                        kwargs["progress"] = progress
                     await send(chat_id, str(path), **kwargs)
                     return
                 except FloodWait as e:
