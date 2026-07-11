@@ -423,22 +423,24 @@ async def main() -> None:
 
     await _startup()
 
-    worker_task = None
-    async with app:
-        log.info("Bot started.")
-        await requeue_incomplete_jobs()
-        worker_task = asyncio.create_task(worker_loop())
-        await idle()  # blocks until SIGINT/SIGTERM
+    try:
+        worker_task = None
+        async with app:
+            log.info("Bot started.")
+            await requeue_incomplete_jobs()
+            worker_task = asyncio.create_task(worker_loop())
+            await idle()  # blocks until SIGINT/SIGTERM
 
-    log.info("Shutting down, finishing current file then stopping…")
-    _shutdown_event.set()
-    if worker_task:
-        try:
-            await asyncio.wait_for(worker_task, timeout=35)
-        except asyncio.TimeoutError:
-            worker_task.cancel()
-    await store.close()
-    log.info("Shutdown complete.")
+        log.info("Shutting down, finishing current file then stopping…")
+        _shutdown_event.set()
+        if worker_task:
+            try:
+                await asyncio.wait_for(worker_task, timeout=35)
+            except asyncio.TimeoutError:
+                worker_task.cancel()
+    finally:
+        await store.close()
+        log.info("Shutdown complete.")
 
 
 if __name__ == "__main__":
