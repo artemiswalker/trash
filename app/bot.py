@@ -231,12 +231,8 @@ async def process_job(job: Job) -> None:
         finally:
             edit_pending = False
 
-    async def update_status_msg(force: bool = False) -> None:
+    async def update_status_msg() -> None:
         nonlocal last_edit_time, edit_pending
-        if force:
-            await perform_status_edit()
-            return
-
         if edit_pending:
             return
 
@@ -365,7 +361,7 @@ async def process_job(job: Job) -> None:
                 if not split_parts:
                     skipped.append((f.name, "File exceeds 1.95GB limit and was skipped"))
                     await store.update_progress(job.id, sent_files=sent, skipped_files=len(skipped))
-                    await update_status_msg(force=True)
+                    await update_status_msg()
                     continue
                 # Append split parts to pending list to process in the current run
                 for part in split_parts:
@@ -385,7 +381,7 @@ async def process_job(job: Job) -> None:
                 _active_job_metrics["current_upload_file"] = f.name
                 _active_job_metrics["current_upload_pct"] = 0.0
                 _active_job_metrics["upload_speed"] = 0.0
-                await update_status_msg(force=True)
+                await update_status_msg()
 
                 await upload_file(app, chat_id, f, progress=on_upload_progress)
                 await store.mark_uploaded(job.id, f.name)
@@ -472,7 +468,7 @@ async def process_job(job: Job) -> None:
         await report(f"Downloading:\n{job.url}\n(rate-limited, large albums take a while)")
 
         result = await downloader_task
-        await update_status_msg(force=True)
+        await update_status_msg()
         await uploader_task
     except asyncio.CancelledError:
         log.info("Job %s was cancelled/aborted", job.id)
