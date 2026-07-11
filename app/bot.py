@@ -10,7 +10,7 @@ from pathlib import Path
 
 from pyrogram import Client, filters, idle
 from pyrogram.enums import ChatType
-from pyrogram.types import Message
+from pyrogram.types import Message, CallbackQuery
 
 from .config import settings
 from .db import Job, JobStatus, JobStore
@@ -67,14 +67,16 @@ async def log_upload(job_id: int, filename: str) -> None:
 
 async def cleanup_orphaned_directories() -> None:
     """Scan downloads directory and delete any directories job_{id} that are
-    not active or queued in the database."""
+    not active, queued, or waiting in the database."""
     if not settings.downloads_dir.exists():
         return
 
     try:
-        active_jobs = await store.resumable_jobs()
-        queued_jobs = await store.queued_jobs()
-        keep_ids = {f"job_{job.id}" for job in [*active_jobs, *queued_jobs]}
+        cur = await store.db.execute(
+            "SELECT id FROM jobs WHERE status IN ('queued', 'downloading', 'uploading', 'waiting')"
+        )
+        rows = await cur.fetchall()
+        keep_ids = {f"job_{r['id']}" for r in rows}
 
         def run_cleanup():
             for p in settings.downloads_dir.iterdir():
@@ -279,6 +281,22 @@ async def process_job(job: Job) -> None:
             db_job = await store.get_job(job.id)
             if db_job and db_job.status == JobStatus.CANCELLED:
                 return
+
+            # Check for files larger than 1.95GB (Telegram MTProto limit safety threshold)
+            max_limit = int(1.95 * 1024 * 1024 * 1024)
+            if f.exists() and f.stat().st_size > max_limit:
+                from .uploader import handle_large_file
+                split_parts = await handle_large_file(f, bool(db_job.split_large_files))
+                if not split_parts:
+                    skipped.append((f.name, "File exceeds 1.95GB limit and was skipped"))
+                    await store.update_progress(job.id, sent_files=sent, skipped_files=len(skipped))
+                    await update_status_msg()
+                    continue
+                # Append split parts to pending list to process in the current run
+                for part in split_parts:
+                    if part not in pending:
+                        pending.append(part)
+                continue
 
             uploading_files.add(f.name)
             try:
@@ -490,10 +508,56 @@ async def handle_link(_, message: Message) -> None:
             await message.reply_text("Send an actual URL.")
         return
 
-    job = await store.create_job(message.chat.id, text)
-    status_msg = await message.reply_text(f"Queued (job #{job.id}).")
+    # Create job in "waiting" status
+    job = await store.create_job(message.chat.id, text, split_large_files=1)
+    await store.update_progress(job.id, status="waiting")
+
+    # Send confirmation inline keyboard
+    from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("Yes, split them", callback_data=f"split_yes:{job.id}"),
+            InlineKeyboardButton("No, skip them", callback_data=f"split_no:{job.id}")
+        ]
+    ])
+
+    status_msg = await message.reply_text(
+        "Do you want to split files larger than 2GB for this job?",
+        reply_markup=keyboard
+    )
     await store.set_status_message(job.id, status_msg.id)
-    await job_queue.put(job.id)
+
+
+@app.on_callback_query(filters.regex(r"^split_(yes|no):(\d+)$"))
+async def handle_split_choice(_, callback_query: CallbackQuery) -> None:
+    data = callback_query.data
+    choice, job_id_str = data.split(":")
+    job_id = int(job_id_str)
+    split_choice = 1 if choice == "split_yes" else 0
+
+    job = await store.get_job(job_id)
+    if not job:
+        await callback_query.answer("Job not found.", show_alert=True)
+        return
+
+    if job.status != "waiting":
+        await callback_query.answer("This job choice has already been processed.")
+        return
+
+    # Update job in database to QUEUED and save the split choice
+    await store.db.execute(
+        "UPDATE jobs SET status = ?, split_large_files = ? WHERE id = ?",
+        (JobStatus.QUEUED, split_choice, job_id)
+    )
+    await store.db.commit()
+
+    # Edit the message to show queued status (removing the inline keyboard)
+    status_text = f"Queued (job #{job_id})."
+    await callback_query.message.edit_text(status_text)
+    await callback_query.answer("Choice registered.")
+
+    # Put the job on queue
+    await job_queue.put(job_id)
 
 
 async def requeue_incomplete_jobs() -> None:
