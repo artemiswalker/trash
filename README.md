@@ -87,6 +87,30 @@ sudo journalctl -u tgdl-bot -f
 
 ---
 
+## Bot Usage
+
+### Submitting Downloads
+Simply send a media album or video URL to the bot in a chat.
+
+* **Interactive File Splitting**: If a file in the download queue is larger than 1.95GB, the bot will prompt you via inline buttons to choose whether to split it or skip it:
+  * **Split**: Large videos are segmented into playable sub-2GB clips using `ffmpeg` copy mode; documents are split into multi-part chunks.
+  * **Skip**: The file is deleted from the host and skipped.
+
+### Custom gallery-dl Arguments
+You can append custom `gallery-dl` arguments directly after the link URL inside your message. Options containing spaces should be enclosed in quotes:
+* **Example (Multiple pages)**:
+  ```text
+  https://example.com/album/aabbbccdd --extractor-argument example:pages=1-16
+  ```
+* **Example (Chapter range)**:
+  ```text
+  https://example.com/album --range 1-10
+  ```
+> [!NOTE]
+> Options that modify directory layout, output paths, or system config (`-d`, `--directory`, `-o base-directory=...`, `--config`, `-h`, `--help`, `--version`) are automatically stripped out to protect the bot's filesystem.
+
+---
+
 ## Bot Commands
 
 * `/start` — Send welcome message and descriptions.
