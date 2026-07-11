@@ -524,6 +524,16 @@ async def main() -> None:
         worker_task = None
         async with app:
             log.info("Bot started.")
+            try:
+                from pyrogram.types import BotCommand
+                await app.set_bot_commands([
+                    BotCommand("start", "Start the bot and see instructions"),
+                    BotCommand("status", "Check current active job details or queue status"),
+                    BotCommand("cancel", "Instantly abort the active download/upload task"),
+                ])
+                log.info("Bot commands set successfully.")
+            except Exception as e:
+                log.warning("Failed to set bot commands: %s", e)
             await requeue_incomplete_jobs()
             worker_task = asyncio.create_task(worker_loop())
             await idle()  # blocks until SIGINT/SIGTERM
