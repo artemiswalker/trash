@@ -540,10 +540,12 @@ async def worker_loop() -> None:
 @app.on_message(filters.command("start"))
 async def start_cmd(_, message: Message) -> None:
     text = (
-        "Send me a link to download media files (e.g., videos, photo albums) and upload them to Telegram.\n\n"
+        "Send me links to download media files (e.g., videos, photo albums) and upload them to Telegram.\n\n"
         "**Usage:**\n"
-        "• Send a URL: `https://example.com/album`\n"
-        "• Set custom options (shorthand): `https://example.com/album pages=1-16`\n\n"
+        "• **Single URL**: `https://example.com/album1`\n"
+        "• **Shorthand options**: `https://example.com/album1 pages=1-16`\n"
+        "• **Multiple URLs**: `https://example.com/album1 https://example.com/album2`\n"
+        "• **Links File (.txt)**: Send a `.txt` file containing URLs (one per line) and **reply to it** with `/gdl [options]` (e.g., `/gdl pages=1-16`).\n\n"
         "**Commands:**\n"
         "• /status — View active download/upload metrics or queued jobs.\n"
         "• /cancel — Cancel the active task and clean up temporary storage.\n\n"
@@ -590,7 +592,7 @@ async def status_cmd(_, message: Message) -> None:
                 f"**Active Job Status**\n"
                 f"- **Job ID**: #{job.id}\n"
                 f"- **Status**: `{job.status}`\n"
-                f"- **URL**: {job.url}\n"
+                f"- **URL**: {format_url_display(job.url)}\n"
                 f"- **Args**: `{args_str}`\n"
                 f"- **Split > 2GB**: {split_str}\n\n"
                 f"**Downloader Metrics**\n"
@@ -636,7 +638,7 @@ async def status_cmd(_, message: Message) -> None:
                 except Exception:
                     pass
             q_args_str = f" (Args: `{' '.join(q_parsed)}`)" if q_parsed else ""
-            response += f"\n{i}. Job #{q_job.id}: {q_job.url}{q_args_str}"
+            response += f"\n{i}. Job #{q_job.id}: {format_url_display(q_job.url)}{q_args_str}"
         if len(queued) > 5:
             response += f"\n…and {len(queued) - 5} more queued job(s)"
 
@@ -650,7 +652,7 @@ async def status_cmd(_, message: Message) -> None:
                 except Exception:
                     pass
             w_args_str = f" (Args: `{' '.join(w_parsed)}`)" if w_parsed else ""
-            response += f"\n{i}. Job #{w_job.id}: {w_job.url}{w_args_str}"
+            response += f"\n{i}. Job #{w_job.id}: {format_url_display(w_job.url)}{w_args_str}"
         if len(waiting) > 5:
             response += f"\n…and {len(waiting) - 5} more awaiting confirmation"
 
@@ -666,6 +668,81 @@ async def cancel_cmd(_, message: Message) -> None:
     await message.reply_text(
         f"Marked job #{_current_job_id} for cancellation — it'll stop after the current file finishes."
     )
+
+
+@app.on_message(filters.command("gdl"))
+async def gdl_cmd(_, message: Message) -> None:
+    # Check if this command message is a reply to a text file document
+    if not message.reply_to_message or not message.reply_to_message.document:
+        await message.reply_text("Reply to a .txt file containing URLs with `/gdl [options]`.")
+        return
+
+    doc = message.reply_to_message.document
+    if not (doc.file_name.endswith(".txt") or (doc.mime_type and doc.mime_type.startswith("text/"))):
+        await message.reply_text("Please reply to a text (.txt) file.")
+        return
+
+    # Download document to memory/temp file
+    temp_path = await message.reply_to_message.download()
+    if not temp_path or not Path(temp_path).exists():
+        await message.reply_text("Failed to download the file.")
+        return
+
+    try:
+        content = Path(temp_path).read_text(encoding="utf-8", errors="ignore")
+    except Exception as e:
+        await message.reply_text(f"Failed to read the file: {e}")
+        return
+    finally:
+        Path(temp_path).unlink(missing_ok=True)
+
+    urls = []
+    for line in content.splitlines():
+        line = line.strip()
+        if line.startswith(("http://", "https://")):
+            urls.append(line)
+
+    if not urls:
+        await message.reply_text("No valid URLs found in the text file.")
+        return
+
+    text = (message.text or "").strip()
+    import shlex
+    try:
+        tokens = shlex.split(text)
+    except Exception:
+        tokens = text.split()
+
+    raw_args = tokens[1:]  # the first is "/gdl"
+    sanitized_args = sanitize_gdl_args(raw_args, urls)
+    args_json = json.dumps(sanitized_args) if sanitized_args else None
+    urls_json = json.dumps(urls)
+
+    job = await store.create_job(message.chat.id, urls_json, split_large_files=1, args=args_json)
+    await store.update_progress(job.id, status="waiting")
+
+    # Send split prompt
+    from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("Yes, split them", callback_data=f"split_yes:{job.id}"),
+            InlineKeyboardButton("No, skip them", callback_data=f"split_no:{job.id}")
+        ]
+    ])
+
+    args_display = f"\n- **Args**: `{' '.join(sanitized_args)}`" if sanitized_args else ""
+    url_display = format_url_display(urls_json)
+    prompt_text = (
+        f"**Job #{job.id} registered**\n"
+        f"- **URL**: {url_display}{args_display}\n\n"
+        "Do you want to split files larger than 2GB for this job?"
+    )
+    status_msg = await message.reply_text(
+        prompt_text,
+        reply_markup=keyboard,
+        link_preview_options=LinkPreviewOptions(is_disabled=True)
+    )
+    await store.set_status_message(job.id, status_msg.id)
 
 
 def extract_domain_name(url: str) -> str:
@@ -686,9 +763,41 @@ def extract_domain_name(url: str) -> str:
         return "generic"
 
 
-def sanitize_gdl_args(args: list[str], url: Optional[str] = None) -> list[str]:
+def format_url_display(url_field: str) -> str:
+    import json
+    try:
+        urls = json.loads(url_field)
+        if isinstance(urls, list):
+            if len(urls) > 1:
+                return f"{urls[0]} (and {len(urls) - 1} more)"
+            return urls[0]
+    except Exception:
+        pass
+    return url_field
+
+
+def sanitize_gdl_args(args: list[str], url: Optional[str | list[str]] = None) -> list[str]:
     sanitized = []
     skip_next = False
+
+    is_multi_url = False
+    base_url = None
+    if url:
+        if isinstance(url, list):
+            is_multi_url = len(url) > 1
+            base_url = url[0] if url else None
+        elif isinstance(url, str):
+            if url.startswith("["):
+                try:
+                    import json
+                    parsed = json.loads(url)
+                    if isinstance(parsed, list):
+                        is_multi_url = len(parsed) > 1
+                        base_url = parsed[0] if parsed else None
+                except Exception:
+                    pass
+            if not base_url:
+                base_url = url
 
     # Rewrite shorthand arguments and --extractor-argument to standard -o option
     rewritten_args = []
@@ -717,11 +826,15 @@ def sanitize_gdl_args(args: list[str], url: Optional[str] = None) -> list[str]:
                 rest = parts_colon[1]
                 rewritten_args.append("-o")
                 rewritten_args.append(f"extractor.{extractor}.{rest}")
+                i += 1
             else:
-                extractor = extract_domain_name(url) if url else "generic"
-                rewritten_args.append("-o")
-                rewritten_args.append(f"extractor.{extractor}.{arg}")
-            i += 1
+                if is_multi_url:
+                    i += 1
+                else:
+                    extractor = extract_domain_name(base_url) if base_url else "generic"
+                    rewritten_args.append("-o")
+                    rewritten_args.append(f"extractor.{extractor}.{arg}")
+                    i += 1
         else:
             rewritten_args.append(arg)
             i += 1
@@ -755,7 +868,7 @@ def sanitize_gdl_args(args: list[str], url: Optional[str] = None) -> list[str]:
     return sanitized
 
 
-@app.on_message(filters.text & ~filters.command(["start", "status", "cancel"]))
+@app.on_message(filters.text & ~filters.command(["start", "status", "cancel", "gdl"]))
 async def handle_link(_, message: Message) -> None:
     text = (message.text or "").strip()
     is_private = message.chat.type == ChatType.PRIVATE
@@ -771,19 +884,25 @@ async def handle_link(_, message: Message) -> None:
     if not tokens:
         return
 
-    url = tokens[0]
-    raw_args = tokens[1:]
+    urls = []
+    raw_args = []
+    for token in tokens:
+        if token.startswith(("http://", "https://")):
+            urls.append(token)
+        else:
+            raw_args.append(token)
 
-    if not url.startswith(("http://", "https://")):
+    if not urls:
         if is_private:
             await message.reply_text("Send an actual URL.")
         return
 
-    sanitized_args = sanitize_gdl_args(raw_args, url)
+    sanitized_args = sanitize_gdl_args(raw_args, urls)
     args_json = json.dumps(sanitized_args) if sanitized_args else None
+    urls_json = json.dumps(urls)
 
     # Create job in "waiting" status
-    job = await store.create_job(message.chat.id, url, split_large_files=1, args=args_json)
+    job = await store.create_job(message.chat.id, urls_json, split_large_files=1, args=args_json)
     await store.update_progress(job.id, status="waiting")
 
     # Send confirmation inline keyboard
@@ -796,9 +915,10 @@ async def handle_link(_, message: Message) -> None:
     ])
 
     args_display = f"\n- **Args**: `{' '.join(sanitized_args)}`" if sanitized_args else ""
+    url_display = format_url_display(urls_json)
     prompt_text = (
         f"**Job #{job.id} registered**\n"
-        f"- **URL**: {url}{args_display}\n\n"
+        f"- **URL**: {url_display}{args_display}\n\n"
         "Do you want to split files larger than 2GB for this job?"
     )
     status_msg = await message.reply_text(
@@ -843,7 +963,7 @@ async def handle_split_choice(_, callback_query: CallbackQuery) -> None:
     args_display = f"\n- **Args**: `{' '.join(parsed_args)}`" if parsed_args else ""
     status_text = (
         f"**Queued (job #{job_id})**\n"
-        f"- **URL**: {job.url}{args_display}"
+        f"- **URL**: {format_url_display(job.url)}{args_display}"
     )
     await callback_query.message.edit_text(status_text, link_preview_options=LinkPreviewOptions(is_disabled=True))
     await callback_query.answer("Choice registered.")
@@ -884,6 +1004,7 @@ async def main() -> None:
                 from pyrogram.types import BotCommand
                 await app.set_bot_commands([
                     BotCommand("start", "Start the bot and see instructions"),
+                    BotCommand("gdl", "Process replied .txt links file with optional arguments"),
                     BotCommand("status", "Check current active job details or queue status"),
                     BotCommand("cancel", "Instantly abort the active download/upload task"),
                 ])

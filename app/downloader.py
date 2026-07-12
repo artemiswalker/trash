@@ -25,7 +25,13 @@ class DownloadResult:
     attempts: int = 0
 
 
-def _build_cmd(url: str, dest_dir: Path, archive_file: Path, extra_args: Optional[list[str]] = None) -> list[str]:
+def _build_cmd(
+    urls: list[str],
+    dest_dir: Path,
+    archive_file: Path,
+    extra_args: Optional[list[str]] = None,
+    links_file: Optional[Path] = None,
+) -> list[str]:
     cmd = [
         "gallery-dl",
         "--no-mtime",
@@ -39,7 +45,10 @@ def _build_cmd(url: str, dest_dir: Path, archive_file: Path, extra_args: Optiona
     ]
     if extra_args:
         cmd.extend(extra_args)
-    cmd.append(url)
+    if links_file:
+        cmd.extend(["-i", str(links_file)])
+    else:
+        cmd.extend(urls)
     return cmd
 
 
@@ -88,6 +97,21 @@ async def run_with_progress(
             "pip install gallery-dl --break-system-packages"
         )
 
+    import json
+    try:
+        urls = json.loads(url)
+        if not isinstance(urls, list):
+            urls = [url]
+    except Exception:
+        urls = [url]
+
+    links_file = dest_dir.parent / f"{dest_dir.name}_links.txt"
+    try:
+        links_file.write_text("\n".join(urls), encoding="utf-8")
+    except Exception as e:
+        log.exception("Failed to write links file: %s", links_file)
+        return DownloadResult(ok=False, error_tail=f"Failed to create links file: {e}")
+
     dest_dir.mkdir(parents=True, exist_ok=True)
     backoff = Backoff(
         base_s=settings.gdl_backoff_base_s,
@@ -97,10 +121,11 @@ async def run_with_progress(
 
     attempts = 0
     last_stderr = ""
-    while True:
-        attempts += 1
-        cmd = _build_cmd(url, dest_dir, archive_file, extra_args)
-        log.info("gallery-dl run attempt=%s url=%s args=%s", attempts, url, extra_args)
+    try:
+        while True:
+            attempts += 1
+            cmd = _build_cmd(urls, dest_dir, archive_file, extra_args, links_file)
+            log.info("gallery-dl run attempt=%s url_count=%s args=%s", attempts, len(urls), extra_args)
 
         proc = await asyncio.create_subprocess_exec(
             *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
@@ -173,3 +198,6 @@ async def run_with_progress(
         )
         await asyncio.sleep(delay)
         last_stderr = ""
+    finally:
+        if links_file and links_file.exists():
+            links_file.unlink(missing_ok=True)

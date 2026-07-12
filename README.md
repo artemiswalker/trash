@@ -96,15 +96,19 @@ Simply send a media album or video URL to the bot in a chat.
   * **Split**: Large videos are segmented into playable sub-2GB clips using `ffmpeg` copy mode; documents are split into multi-part chunks.
   * **Skip**: The file is deleted from the host and skipped.
 
-### Custom gallery-dl Arguments & Shorthands
-You can append custom `gallery-dl` arguments directly after the link URL inside your message. Options containing spaces should be enclosed in quotes.
-* **Shorthand Option (Recommended)**: Simply pass `option=value`. The bot automatically extracts the domain name from the URL to map it to the correct extractor option (e.g., `pages=1-16` or `post_type=video`).
+### Custom gallery-dl Arguments, Shorthands & Multiple URLs
+You can send one or more URLs, or upload a `.txt` links file to download multiple targets simultaneously. Trailing custom options are automatically mapped to the first URL's extractor.
+* **Shorthand Option (Recommended)**: Simply pass `option=value` after the URL:
   ```text
   https://example.com/album/aabbbccdd pages=1-16
   ```
-* **Explicit Shorthand**: Specifying the target extractor module explicitly via `extractor:option=value`:
+* **Multiple URLs**: Send multiple space-separated links directly in the message:
   ```text
-  https://example.com/album/aabbbccdd example:pages=1-16
+  https://example.com/album1 https://example.com/album2
+  ```
+* **Links File (.txt)**: Send a `.txt` file containing URLs (one per line) and **reply to it** with `/gdl [options]`:
+  ```text
+  /gdl pages=1-16
   ```
 * **Full Syntax Option**: You can also use standard command-line options if preferred:
   ```text
