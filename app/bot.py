@@ -100,15 +100,21 @@ async def cleanup_orphaned_directories() -> None:
         log.exception("Error during orphaned directories cleanup")
 
 
-async def safe_edit(chat_id: int, message_id: int, text: str) -> None:
+async def safe_edit(chat_id: int, message_id: int, text: str) -> bool:
     from pyrogram.errors import FloodWait, MessageNotModified
 
     try:
         await app.edit_message_text(chat_id, message_id, text, link_preview_options=LinkPreviewOptions(is_disabled=True))
+        return True
     except MessageNotModified:
-        pass
+        return True
     except FloodWait as e:
+        log.warning("Telegram FloodWait: waiting %s seconds", e.value)
         await asyncio.sleep(e.value + 1)
+        return False
+    except Exception as e:
+        log.warning("Failed to edit status message: %s", e)
+        return False
 
 
 def format_size(size_bytes: float) -> str:
@@ -141,9 +147,16 @@ async def process_job(job: Job) -> None:
     msg_id = job.status_message_id
     dest_dir = settings.downloads_dir / job.download_dir
 
-    async def report(text: str) -> None:
+    last_edited_text = ""
+
+    async def report(text: str) -> bool:
+        nonlocal last_edited_text
         if msg_id:
-            await safe_edit(chat_id, msg_id, text)
+            success = await safe_edit(chat_id, msg_id, text)
+            if success:
+                last_edited_text = text
+            return success
+        return False
 
     uploading_files: set[str] = set()
     uploaded_filenames = await store.get_uploaded_filenames(job.id)
@@ -171,68 +184,95 @@ async def process_job(job: Job) -> None:
     download_count = 0
     trigger_event = asyncio.Event()
 
-    async def perform_status_edit() -> None:
+    async def perform_status_edit() -> bool:
         async with status_lock:
-            dl_size_str = format_size(total_downloaded_bytes)
-            dl_speed_str = format_size(download_speed)
+            # Parse arguments
+            parsed_args = []
+            if job.args:
+                try:
+                    import json
+                    parsed_args = json.loads(job.args)
+                except Exception:
+                    pass
+            args_str = " ".join(parsed_args) if parsed_args else "None"
+            split_str = "Yes" if job.split_large_files else "No"
 
-            if downloader_done.is_set():
-                display_count = download_count
-            else:
-                display_count = sent + len(skipped) + 1
-                if display_count > download_count:
-                    display_count = download_count
+            dl_speed_str = format_size(download_speed)
+            dl_bytes_str = format_size(total_downloaded_bytes)
 
             dl_file = _active_job_metrics["current_download_file"] if not downloader_done.is_set() else None
 
-            if downloader_done.is_set():
-                status_text = (
-                    f"**Downloading complete!** (Total: **{dl_size_str}**)\n"
-                    f"Processed: **{display_count}** item(s)\n\n"
-                    f"**Uploading remaining files…**\n"
-                    f"   • **Sent:** `{sent}`\n"
-                    f"   • **Skipped:** `{len(skipped)}`"
+            # Calculate total files
+            total_files_str = str(download_count) if downloader_done.is_set() else "Calculating"
+
+            status_text = (
+                f"**Active Job Status**\n"
+                f"- **Job ID**: #{job.id}\n"
+                f"- **Status**: `{'Uploading' if downloader_done.is_set() else 'Downloading & Uploading'}`\n"
+                f"- **URL**: {format_url_display(job.url)}\n"
+                f"- **Args**: `{args_str}`\n"
+                f"- **Split > 2GB**: {split_str}\n\n"
+                f"**Downloader Metrics**\n"
+            )
+
+            if not downloader_done.is_set():
+                if dl_file:
+                    status_text += f"- **Current File**: `{dl_file}`\n"
+                status_text += (
+                    f"- **Files Downloaded**: {download_count}\n"
+                    f"- **Downloaded Data**: {dl_bytes_str}\n"
+                    f"- **Download Speed**: {dl_speed_str}/s\n\n"
                 )
             else:
-                dl_file_line = f"   • **File:** `{dl_file}`\n" if dl_file else ""
-                status_text = (
-                    f"**Downloading & Uploading…**\n"
-                    f"Processed: **{display_count}** item(s)\n\n"
-                    f"**Downloader Status:**\n"
-                    f"{dl_file_line}"
-                    f"   • **Downloaded Data:** `{dl_size_str}`\n"
-                    f"   • **Speed:** `{dl_speed_str}/s`\n\n"
-                    f"**Uploader Status:**\n"
-                    f"   • **Sent:** `{sent}`\n"
-                    f"   • **Skipped:** `{len(skipped)}`"
+                status_text += (
+                    f"- **Downloading**: `Complete` (Total: {dl_bytes_str})\n"
+                    f"- **Files Downloaded**: {download_count}\n\n"
                 )
+
+            status_text += (
+                f"**Uploader Metrics**\n"
+                f"- **Files Sent**: {sent} / {total_files_str}\n"
+                f"- **Files Skipped**: {len(skipped)}\n"
+            )
 
             if current_upload_file:
                 up_speed_str = format_size(upload_speed)
                 bar = make_progress_bar(current_upload_pct)
                 status_text += (
-                    f"\n\n**Current Upload:**\n"
-                    f"   • **File:** `{current_upload_file}`\n"
-                    f"   • **Progress:** `{current_upload_pct:.1f}%` `[{bar}]`\n"
-                    f"   • **Speed:** `{up_speed_str}/s`"
+                    f"- **Current File**: `{current_upload_file}`\n"
+                    f"- **Upload Progress**: {current_upload_pct:.1f}%\n"
+                    f"  `[{bar}]`\n"
+                    f"- **Upload Speed**: {up_speed_str}/s\n"
                 )
 
-            await report(status_text)
+            if status_text == last_edited_text:
+                return True
+
+            return await report(status_text)
 
     async def status_updater_loop() -> None:
+        current_cooldown = 10.0
         try:
             while not (downloader_done.is_set() and uploader_done.is_set()):
                 if _shutdown_event.is_set():
                     break
                 try:
-                    await asyncio.wait_for(trigger_event.wait(), timeout=10.0)
+                    await asyncio.wait_for(trigger_event.wait(), timeout=current_cooldown)
                 except asyncio.TimeoutError:
                     pass
                 else:
                     trigger_event.clear()
 
-                await perform_status_edit()
-                await asyncio.sleep(6.0)
+                success = await perform_status_edit()
+                if not success:
+                    # Increase cooldown schedule if throttled
+                    current_cooldown = min(current_cooldown + 10.0, 60.0)
+                    log.info("Status updater loop backed off to %ss cooldown", current_cooldown)
+                else:
+                    # Recover gradually to base rate of 10s
+                    current_cooldown = max(current_cooldown - 2.0, 10.0)
+
+                await asyncio.sleep(current_cooldown)
 
             await perform_status_edit()
         except asyncio.CancelledError:
@@ -241,14 +281,9 @@ async def process_job(job: Job) -> None:
             log.exception("Error in status updater loop")
 
     def on_progress(count: int, filename: Optional[str] = None) -> None:
-        nonlocal download_count, last_download_file
+        nonlocal download_count
         download_count = count
         _active_job_metrics["download_count"] = count
-        if filename:
-            _active_job_metrics["current_download_file"] = filename
-            if filename != last_download_file:
-                last_download_file = filename
-                trigger_event.set()
 
     async def on_upload_progress(current: int, total: int) -> None:
         nonlocal current_upload_pct, upload_speed, last_uploaded_bytes, last_upload_speed_time
@@ -310,6 +345,19 @@ async def process_job(job: Job) -> None:
                     total_downloaded_bytes = current_size
                     _active_job_metrics["download_speed"] = download_speed
                     _active_job_metrics["total_downloaded_bytes"] = total_downloaded_bytes
+
+                # Track filename changes from *.part files
+                current_file = None
+                try:
+                    part_files = sorted(p.name for p in dest_dir.rglob("*.part") if p.is_file())
+                    if part_files:
+                        current_file = part_files[0]
+                except Exception:
+                    pass
+
+                if _active_job_metrics.get("current_download_file") != current_file:
+                    _active_job_metrics["current_download_file"] = current_file
+                    trigger_event.set()
 
                 await asyncio.sleep(2)
         except asyncio.CancelledError:
