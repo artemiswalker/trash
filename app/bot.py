@@ -559,14 +559,22 @@ async def process_job(job: Job) -> None:
         files_remaining = [p for p in dest_dir.rglob("*") if p.is_file() and not p.name.endswith(".part")]
 
     await store.update_progress(job.id, status=JobStatus.DONE, sent_files=sent, skipped_files=len(skipped))
-    summary = f"Done. Uploaded {sent} file(s) total."
+    
+    if not result.ok:
+        summary = (
+            f"Completed with some errors. Uploaded {sent} file(s) total.\n\n"
+            f"**Error tail:**\n"
+            f"```\n{result.error_tail[-600:]}\n```"
+        )
+    else:
+        summary = f"Done. Uploaded {sent} file(s) total."
+
     if skipped:
         preview = "\n".join(f"- {n} ({info})" for n, info in skipped[:20])
         more = f"\n…and {len(skipped) - 20} more" if len(skipped) > 20 else ""
         summary += f"\nSkipped:\n{preview}{more}"
     await app.send_message(chat_id, summary, link_preview_options=LinkPreviewOptions(is_disabled=True))
 
-    # cleanup: remove local directory once everyone is accounted for
     shutil.rmtree(dest_dir, ignore_errors=True)
 
 

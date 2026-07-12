@@ -105,27 +105,25 @@ async def run_with_progress(
     except Exception:
         urls = [url]
 
-    links_file = dest_dir.parent / f"{dest_dir.name}_links.txt"
-    try:
-        links_file.write_text("\n".join(urls), encoding="utf-8")
-    except Exception as e:
-        log.exception("Failed to write links file: %s", links_file)
-        return DownloadResult(ok=False, error_tail=f"Failed to create links file: {e}")
-
     dest_dir.mkdir(parents=True, exist_ok=True)
-    backoff = Backoff(
-        base_s=settings.gdl_backoff_base_s,
-        multiplier=settings.gdl_backoff_multiplier,
-        max_attempts=settings.gdl_max_run_retries,
-    )
-
     attempts = 0
     last_stderr = ""
-    try:
+    success_count = 0
+    total_urls = len(urls)
+    total_download_count = 0
+
+    for idx, single_url in enumerate(urls, 1):
+        backoff = Backoff(
+            base_s=settings.gdl_backoff_base_s,
+            multiplier=settings.gdl_backoff_multiplier,
+            max_attempts=settings.gdl_max_run_retries,
+        )
+
+        url_success = False
         while True:
             attempts += 1
-            cmd = _build_cmd(urls, dest_dir, archive_file, extra_args, links_file)
-            log.info("gallery-dl run attempt=%s url_count=%s args=%s", attempts, len(urls), extra_args)
+            cmd = _build_cmd([single_url], dest_dir, archive_file, extra_args, links_file=None)
+            log.info("gallery-dl run url %s/%s attempt=%s url=%s args=%s", idx, total_urls, attempts, single_url, extra_args)
 
             proc = await asyncio.create_subprocess_exec(
                 *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
@@ -138,19 +136,8 @@ async def run_with_progress(
                 assert proc.stdout is not None
                 async for line in proc.stdout:
                     count += 1
-                    text = line.decode(errors="replace").strip()
-                    filename = None
-                    if text:
-                        parts = text.split()
-                        if parts:
-                            last_part = parts[-1].strip("'\"")
-                            if "/" in last_part or "\\" in last_part or "." in last_part:
-                                try:
-                                    filename = Path(last_part).name
-                                except Exception:
-                                    pass
                     if on_progress:
-                        on_progress(count, filename)
+                        on_progress(total_download_count + count)
 
             async def pump_stderr():
                 assert proc.stderr is not None
@@ -180,16 +167,19 @@ async def run_with_progress(
                 raise
 
             last_stderr = last_stderr or "".join(stderr_buf)[-3000:]
-            files = sorted(p for p in dest_dir.rglob("*") if p.is_file())
 
             if returncode == 0:
-                return DownloadResult(ok=True, files=files, error_tail=last_stderr, attempts=attempts)
+                url_success = True
+                success_count += 1
+                total_download_count += count
+                if on_progress:
+                    on_progress(total_download_count)
+                break
 
             rate_limited = looks_rate_limited(last_stderr)
             if not rate_limited or backoff.exhausted:
-                return DownloadResult(
-                    ok=False, files=files, error_tail=last_stderr, attempts=attempts
-                )
+                log.error("gallery-dl failed for URL %s: %s", single_url, last_stderr)
+                break
 
             delay = backoff.next_delay()
             log.warning(
@@ -198,6 +188,7 @@ async def run_with_progress(
             )
             await asyncio.sleep(delay)
             last_stderr = ""
-    finally:
-        if links_file and links_file.exists():
-            links_file.unlink(missing_ok=True)
+
+    files = sorted(p for p in dest_dir.rglob("*") if p.is_file())
+    ok = (success_count == total_urls)
+    return DownloadResult(ok=ok, files=files, error_tail=last_stderr, attempts=attempts)
