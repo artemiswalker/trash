@@ -38,7 +38,6 @@ def setup_logging() -> None:
     file_handler.setFormatter(fmt)
     root.addHandler(file_handler)
 
-    # pyrogram is chatty at INFO; keep it at WARNING unless debugging
     logging.getLogger("pyrogram").setLevel(logging.WARNING)
 
 
@@ -172,7 +171,6 @@ async def process_job(job: Job) -> None:
     last_upload_speed_time = 0.0
     last_download_file: str | None = None
 
-    # For download size/speed tracking
     total_downloaded_bytes = 0
     download_speed = 0.0
     last_download_size = 0
@@ -187,7 +185,6 @@ async def process_job(job: Job) -> None:
 
     async def perform_status_edit() -> bool:
         async with status_lock:
-            # Parse arguments
             parsed_args = []
             if job.args:
                 try:
@@ -203,7 +200,6 @@ async def process_job(job: Job) -> None:
 
             dl_file = _active_job_metrics["current_download_file"] if not downloader_done.is_set() else None
 
-            # Calculate total files
             total_files_str = str(download_count) if downloader_done.is_set() else "Calculating"
 
             status_text = (
@@ -266,11 +262,9 @@ async def process_job(job: Job) -> None:
 
                 success = await perform_status_edit()
                 if not success:
-                    # Increase cooldown schedule if throttled
                     current_cooldown = min(current_cooldown + 10.0, 60.0)
                     log.info("Status updater loop backed off to %ss cooldown", current_cooldown)
                 else:
-                    # Recover gradually to base rate of 10s
                     current_cooldown = max(current_cooldown - 2.0, 10.0)
 
                 await asyncio.sleep(current_cooldown)
@@ -292,8 +286,6 @@ async def process_job(job: Job) -> None:
             return
         pct = current * 100.0 / total
         now = time.time()
-
-        # Calculate upload speed
         dt = now - last_upload_speed_time
         if dt >= 1.0 or last_upload_speed_time == 0.0:
             bytes_diff = current - last_uploaded_bytes
@@ -347,7 +339,6 @@ async def process_job(job: Job) -> None:
                     _active_job_metrics["download_speed"] = download_speed
                     _active_job_metrics["total_downloaded_bytes"] = total_downloaded_bytes
 
-                # Track filename changes from *.part files
                 current_file = None
                 try:
                     part_files = sorted(p.name for p in dest_dir.rglob("*.part") if p.is_file())
@@ -391,7 +382,6 @@ async def process_job(job: Job) -> None:
             if db_job and db_job.status == JobStatus.CANCELLED:
                 return
 
-            # Check for files larger than 1.95GB (Telegram MTProto limit safety threshold)
             max_limit = int(1.95 * 1024 * 1024 * 1024)
             if f.exists() and f.stat().st_size > max_limit:
                 from .uploader import handle_large_file
@@ -401,7 +391,6 @@ async def process_job(job: Job) -> None:
                     await store.update_progress(job.id, sent_files=sent, skipped_files=len(skipped))
                     trigger_event.set()
                     continue
-                # Append split parts to pending list to process in the current run
                 for part in split_parts:
                     if part not in pending:
                         pending.append(part)
@@ -429,7 +418,6 @@ async def process_job(job: Job) -> None:
                 await log_upload(job.id, f.name)
                 log.info("Successfully uploaded %s for job %s", f.name, job.id)
 
-                # Cleanup file immediately after successful upload to avoid storage issues
                 try:
                     f_size = f.stat().st_size
                     f.unlink(missing_ok=True)
@@ -440,7 +428,7 @@ async def process_job(job: Job) -> None:
             except UploadTooLarge as e:
                 skipped.append((f.name, str(e)))
                 log.warning("File too large to upload: %s", f.name)
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:  
                 log.exception("Upload failed for %s", f)
                 skipped.append((f.name, f"error: {e}"))
             finally:
@@ -530,7 +518,7 @@ async def process_job(job: Job) -> None:
         await store.update_progress(job.id, status=JobStatus.FAILED, error=str(e))
         await report(str(e))
         return
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:  
         log.exception("job %s failed", job.id)
         await store.update_progress(job.id, status=JobStatus.FAILED, error=str(e))
         await report(f"Job failed with an unexpected error: {e}")
@@ -542,7 +530,6 @@ async def process_job(job: Job) -> None:
         await asyncio.gather(monitor_task, cancellation_task, updater_task, return_exceptions=True)
         _current_job_id = None
 
-    # Final cleanup and report for successful run
     if not result.ok and sent == 0:
         await store.update_progress(
             job.id, status=JobStatus.FAILED, error=result.error_tail[-1500:]
@@ -553,7 +540,6 @@ async def process_job(job: Job) -> None:
         )
         return
 
-    # Scan to see if there are any remaining files that were skipped or not uploaded
     files_remaining = []
     if dest_dir.exists():
         files_remaining = [p for p in dest_dir.rglob("*") if p.is_file() and not p.name.endswith(".part")]
@@ -602,7 +588,7 @@ async def start_cmd(_, message: Message) -> None:
         "• **Single URL**: `https://example.com/album1`\n"
         "• **Shorthand options**: `https://example.com/album1 pages=1-16`\n"
         "• **Multiple URLs**: `https://example.com/album1 https://example.com/album2`\n"
-        "• **Links File (.txt)**: Send a `.txt` file containing URLs (one per line) and **reply to it** with `/gdl [options]` (e.g., `/gdl pages=1-16`).\n\n"
+        "• **Links File (.txt)**: Send a `.txt` file containing URLs (one per line) and **reply to it** with `/gdl` to process them.\n\n"
         "**Commands:**\n"
         "• /status — View active download/upload metrics or queued jobs.\n"
         "• /cancel — Cancel the active task and clean up temporary storage.\n\n"
@@ -620,7 +606,6 @@ async def status_cmd(_, message: Message) -> None:
     if _current_job_id is not None:
         job = await store.get_job(_current_job_id)
         if job and is_job_owner(chat_id, job):
-            # Parse arguments
             parsed_args = []
             if job.args:
                 try:
@@ -630,7 +615,6 @@ async def status_cmd(_, message: Message) -> None:
             args_str = " ".join(parsed_args) if parsed_args else "None"
             split_str = "Yes" if job.split_large_files else "No"
 
-            # Fetch live metrics
             dl_speed = _active_job_metrics["download_speed"]
             ul_speed = _active_job_metrics["upload_speed"]
             dl_bytes = _active_job_metrics["total_downloaded_bytes"]
@@ -643,7 +627,6 @@ async def status_cmd(_, message: Message) -> None:
             ul_speed_str = format_size(ul_speed)
             dl_bytes_str = format_size(dl_bytes)
 
-            # Build progress bar
             bar = make_progress_bar(ul_pct)
 
             status_text = (
@@ -676,10 +659,8 @@ async def status_cmd(_, message: Message) -> None:
             await message.reply_text(status_text, link_preview_options=LinkPreviewOptions(is_disabled=True))
             return
 
-    # Check for waiting/queued jobs for THIS chat
     queued = [q for q in await store.queued_jobs() if is_job_owner(chat_id, q)]
 
-    # Query waiting jobs directly for THIS chat
     cur = await store.db.execute("SELECT * FROM jobs WHERE status = 'waiting' AND chat_id = ? ORDER BY id", (chat_id,))
     waiting_rows = await cur.fetchall()
     waiting = [store._row_to_job(r) for r in waiting_rows]
@@ -731,7 +712,6 @@ async def cancel_cmd(_, message: Message) -> None:
             )
             active_cancelled = True
 
-    # Cancel queued/waiting jobs for this chat so they don't start
     cur = await store.db.execute(
         "SELECT id FROM jobs WHERE chat_id = ? AND status IN ('queued', 'waiting')",
         (chat_id,)
@@ -750,7 +730,6 @@ async def cancel_cmd(_, message: Message) -> None:
 
 @app.on_message(filters.command("gdl"))
 async def gdl_cmd(_, message: Message) -> None:
-    # Check if this command message is a reply to a text file document
     if not message.reply_to_message or not message.reply_to_message.document:
         await message.reply_text("Reply to a .txt file containing URLs with `/gdl [options]`.")
         return
@@ -760,7 +739,6 @@ async def gdl_cmd(_, message: Message) -> None:
         await message.reply_text("Please reply to a text (.txt) file.")
         return
 
-    # Download document to memory/temp file
     temp_path = await message.reply_to_message.download()
     if not temp_path or not Path(temp_path).exists():
         await message.reply_text("Failed to download the file.")
@@ -784,22 +762,11 @@ async def gdl_cmd(_, message: Message) -> None:
         await message.reply_text("No valid URLs found in the text file.")
         return
 
-    text = (message.text or "").strip()
-    import shlex
-    try:
-        tokens = shlex.split(text)
-    except Exception:
-        tokens = text.split()
-
-    raw_args = tokens[1:]  # the first is "/gdl"
-    sanitized_args = sanitize_gdl_args(raw_args, urls)
-    args_json = json.dumps(sanitized_args) if sanitized_args else None
     urls_json = json.dumps(urls)
 
-    job = await store.create_job(message.chat.id, urls_json, split_large_files=1, args=args_json)
+    job = await store.create_job(message.chat.id, urls_json, split_large_files=1, args=None)
     await store.update_progress(job.id, status="waiting")
 
-    # Send split prompt
     from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
     keyboard = InlineKeyboardMarkup([
         [
@@ -808,11 +775,10 @@ async def gdl_cmd(_, message: Message) -> None:
         ]
     ])
 
-    args_display = f"\n- **Args**: `{' '.join(sanitized_args)}`" if sanitized_args else ""
     url_display = format_url_display(urls_json)
     prompt_text = (
         f"**Job #{job.id} registered**\n"
-        f"- **URL**: {url_display}{args_display}\n\n"
+        f"- **URL**: {url_display}\n\n"
         "Do you want to split files larger than 2GB for this job?"
     )
     status_msg = await message.reply_text(
@@ -877,7 +843,6 @@ def sanitize_gdl_args(args: list[str], url: Optional[str | list[str]] = None) ->
             if not base_url:
                 base_url = url
 
-    # Rewrite shorthand arguments and --extractor-argument to standard -o option
     rewritten_args = []
     i = 0
     while i < len(args):
@@ -922,20 +887,16 @@ def sanitize_gdl_args(args: list[str], url: Optional[str | list[str]] = None) ->
             skip_next = False
             continue
 
-        # Strip directory/config override options
         if arg in ("-d", "--directory", "--config"):
             skip_next = True
             continue
 
-        # Ignore help / version arguments that would prevent download
         if arg in ("-h", "--help", "--version"):
             continue
 
-        # If it is -o or --option, check the value
         if arg in ("-o", "--option"):
             if idx + 1 < len(rewritten_args):
                 val = rewritten_args[idx + 1]
-                # If it tries to set base-directory, skip both
                 if "base-directory" in val or "directory" in val or "path" in val:
                     skip_next = True
                     continue
@@ -979,11 +940,9 @@ async def handle_link(_, message: Message) -> None:
     args_json = json.dumps(sanitized_args) if sanitized_args else None
     urls_json = json.dumps(urls)
 
-    # Create job in "waiting" status
     job = await store.create_job(message.chat.id, urls_json, split_large_files=1, args=args_json)
     await store.update_progress(job.id, status="waiting")
 
-    # Send confirmation inline keyboard
     from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
     keyboard = InlineKeyboardMarkup([
         [
@@ -1019,7 +978,6 @@ async def handle_split_choice(_, callback_query: CallbackQuery) -> None:
         await callback_query.answer("Job not found.", show_alert=True)
         return
 
-    # Verify if the callback comes from the authorized chat where the job was registered
     if not is_job_owner(callback_query.message.chat.id, job):
         await callback_query.answer("Unauthorized: You cannot manage split choices for this job.", show_alert=True)
         return
@@ -1028,14 +986,12 @@ async def handle_split_choice(_, callback_query: CallbackQuery) -> None:
         await callback_query.answer("This job choice has already been processed.")
         return
 
-    # Update job in database to QUEUED and save the split choice
     await store.db.execute(
         "UPDATE jobs SET status = ?, split_large_files = ? WHERE id = ?",
         (JobStatus.QUEUED, split_choice, job_id)
     )
     await store.db.commit()
 
-    # Edit the message to show queued status (removing the inline keyboard)
     import json
     parsed_args = []
     if job.args:
@@ -1050,8 +1006,6 @@ async def handle_split_choice(_, callback_query: CallbackQuery) -> None:
     )
     await callback_query.message.edit_text(status_text, link_preview_options=LinkPreviewOptions(is_disabled=True))
     await callback_query.answer("Choice registered.")
-
-    # Put the job on queue
     await job_queue.put(job_id)
 
 
@@ -1096,7 +1050,7 @@ async def main() -> None:
                 log.warning("Failed to set bot commands: %s", e)
             await requeue_incomplete_jobs()
             worker_task = asyncio.create_task(worker_loop())
-            await idle()  # blocks until SIGINT/SIGTERM
+            await idle()
 
         log.info("Shutting down, finishing current file then stopping…")
         _shutdown_event.set()
