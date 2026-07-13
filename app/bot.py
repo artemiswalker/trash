@@ -214,6 +214,23 @@ async def process_job(job: Job) -> None:
 
     async def perform_status_edit() -> bool:
         async with status_lock:
+            nonlocal msg_id, last_edited_text
+            if downloader_done.is_set() and current_upload_file:
+                try:
+                    f_path = dest_dir / current_upload_file
+                    if f_path.exists() and f_path.stat().st_size < 25 * 1024 * 1024:
+                        if msg_id:
+                            try:
+                                await app.delete_messages(chat_id, msg_id)
+                            except Exception:
+                                pass
+                            msg_id = None
+                            last_edited_text = ""
+                            await store.set_status_message(job.id, None)
+                        return True
+                except Exception:
+                    pass
+
             status_text = compile_status_text(
                 job=job,
                 downloader_done=downloader_done.is_set(),
