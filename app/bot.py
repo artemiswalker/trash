@@ -475,6 +475,7 @@ async def process_job(job: Job) -> None:
             # Check if this file needs conversion
             is_incompatible = f.suffix.lower() in CONVERSION_EXT
             if is_incompatible and f.name not in _converted_files.get(job.id, set()):
+                prompt_msg_id = None
                 if job.id not in _conversion_ids:
                     _conversion_ids[job.id] = {}
                 conv_id = None
@@ -501,12 +502,13 @@ async def process_job(job: Job) -> None:
                         f"The file format is not natively supported for Telegram inline streaming. "
                         f"Do you want to convert it to MP4 first, or upload the original as a document?"
                     )
-                    await app.send_message(
+                    prompt_msg = await app.send_message(
                         chat_id,
                         prompt_text,
                         reply_markup=keyboard,
                         link_preview_options=LinkPreviewOptions(is_disabled=True)
                     )
+                    prompt_msg_id = prompt_msg.id
 
                     if job.id not in _conversion_events:
                         _conversion_events[job.id] = {}
@@ -524,25 +526,64 @@ async def process_job(job: Job) -> None:
                     output_name = f.stem + "_converted.mp4"
                     output_path = f.parent / output_name
 
-                    await app.send_message(
+                    status_msg = await app.send_message(
                         chat_id,
                         f"**Job #{job.id} - Media Conversion**\nConverting `{f.name}` to standard MP4 container...",
                         link_preview_options=LinkPreviewOptions(is_disabled=True)
                     )
 
-                    success = await convert_media_async(f, output_path)
-                    if success:
-                        log.info("Successfully converted video %s to %s", f.name, output_name)
-                        f.unlink(missing_ok=True)
-                        break
-                    else:
-                        log.error("Failed to convert video %s", f.name)
-                        await app.send_message(
-                            chat_id,
-                            f"**Job #{job.id} - Conversion Failed**\nFailed to convert `{f.name}`. Uploading original as document.",
-                            link_preview_options=LinkPreviewOptions(is_disabled=True)
-                        )
-                        _conversion_choices[job.id][conv_id] = "orig"
+                    try:
+                        success = await convert_media_async(f, output_path)
+                        if success:
+                            log.info("Successfully converted video %s to %s", f.name, output_name)
+                            f.unlink(missing_ok=True)
+                            if prompt_msg_id:
+                                try:
+                                    await app.delete_messages(chat_id, prompt_msg_id)
+                                except Exception:
+                                    pass
+                            try:
+                                await app.delete_messages(chat_id, status_msg.id)
+                            except Exception:
+                                pass
+                            break
+                        else:
+                            log.error("Failed to convert video %s", f.name)
+                            try:
+                                await app.delete_messages(chat_id, status_msg.id)
+                            except Exception:
+                                pass
+                            fail_msg = await app.send_message(
+                                chat_id,
+                                f"**Job #{job.id} - Conversion Failed**\nFailed to convert `{f.name}`. Uploading original as document.",
+                                link_preview_options=LinkPreviewOptions(is_disabled=True)
+                            )
+                            if prompt_msg_id:
+                                try:
+                                    await app.delete_messages(chat_id, prompt_msg_id)
+                                except Exception:
+                                    pass
+                            async def delete_fail_msg(msg_to_del):
+                                await asyncio.sleep(5)
+                                try:
+                                    await app.delete_messages(chat_id, msg_to_del.id)
+                                except Exception:
+                                    pass
+                            asyncio.create_task(delete_fail_msg(fail_msg))
+
+                            _conversion_choices[job.id][conv_id] = "orig"
+                    except Exception:
+                        try:
+                            await app.delete_messages(chat_id, status_msg.id)
+                        except Exception:
+                            pass
+                        raise
+
+                if choice == "orig" and prompt_msg_id:
+                    try:
+                        await app.delete_messages(chat_id, prompt_msg_id)
+                    except Exception:
+                        pass
 
             max_limit = int(1.95 * 1024 * 1024 * 1024)
             if f.exists() and f.stat().st_size > max_limit:
