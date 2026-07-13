@@ -28,7 +28,6 @@ class DownloadResult:
 def _build_cmd(
     urls: list[str],
     dest_dir: Path,
-    archive_file: Path,
     extra_args: Optional[list[str]] = None,
     links_file: Optional[Path] = None,
 ) -> list[str]:
@@ -36,7 +35,6 @@ def _build_cmd(
         "gallery-dl",
         "--no-mtime",
         "-D", str(dest_dir),
-        "--download-archive", str(archive_file),
         "--sleep", f"{settings.gdl_sleep_min}-{settings.gdl_sleep_max}",
         "--sleep-request", settings.gdl_sleep_request,
         "--limit-rate", settings.gdl_limit_rate,
@@ -86,7 +84,6 @@ async def _stream_run(cmd: list[str]) -> tuple[int, str, Callable[[], int]]:
 async def run_with_progress(
     url: str,
     dest_dir: Path,
-    archive_file: Path,
     on_progress: Optional[Callable[[int, Optional[str]], None]] = None,
     extra_args: Optional[list[str]] = None,
 ) -> DownloadResult:
@@ -122,7 +119,7 @@ async def run_with_progress(
         url_success = False
         while True:
             attempts += 1
-            cmd = _build_cmd([single_url], dest_dir, archive_file, extra_args, links_file=None)
+            cmd = _build_cmd([single_url], dest_dir, extra_args, links_file=None)
             log.info("gallery-dl run url %s/%s attempt=%s url=%s args=%s", idx, total_urls, attempts, single_url, extra_args)
 
             proc = await asyncio.create_subprocess_exec(

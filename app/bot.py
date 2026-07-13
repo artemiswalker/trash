@@ -328,7 +328,7 @@ async def process_job(job: Job) -> None:
                     log.exception("Failed to parse extra args from job: %s", job.args)
 
             return await run_with_progress(
-                job.url, dest_dir, settings.gdl_archive_path, on_progress=on_progress, extra_args=extra_args
+                job.url, dest_dir, on_progress=on_progress, extra_args=extra_args
             )
         finally:
             downloader_done.set()
@@ -700,17 +700,17 @@ async def process_job(job: Job) -> None:
             await store.update_progress(job.id, status=JobStatus.QUEUED)
             await report("Paused for shutdown — will resume on next start.")
         else:
-            await store.update_progress(job.id, status=JobStatus.CANCELLED)
+            await store.update_progress(job.id, status=JobStatus.CANCELLED, url="")
             await report("Job cancelled.")
             shutil.rmtree(dest_dir, ignore_errors=True)
         return
     except GalleryDLNotFound as e:
-        await store.update_progress(job.id, status=JobStatus.FAILED, error=str(e))
+        await store.update_progress(job.id, status=JobStatus.FAILED, error=str(e), url="")
         await report(str(e))
         return
     except Exception as e:  
         log.exception("job %s failed", job.id)
-        await store.update_progress(job.id, status=JobStatus.FAILED, error=str(e))
+        await store.update_progress(job.id, status=JobStatus.FAILED, error=str(e), url="")
         await report(f"Job failed with an unexpected error: {e}")
         return
     finally:
@@ -735,7 +735,7 @@ async def process_job(job: Job) -> None:
 
     if not result.ok and sent == 0:
         await store.update_progress(
-            job.id, status=JobStatus.FAILED, error=result.error_tail[-1500:]
+            job.id, status=JobStatus.FAILED, error=result.error_tail[-1500:], url=""
         )
         await report(
             f"gallery-dl failed after {result.attempts} attempt(s) and produced no files.\n"
@@ -747,7 +747,7 @@ async def process_job(job: Job) -> None:
     if dest_dir.exists():
         files_remaining = [p for p in dest_dir.rglob("*") if p.is_file() and not p.name.endswith(".part")]
 
-    await store.update_progress(job.id, status=JobStatus.DONE, sent_files=sent, skipped_files=len(skipped))
+    await store.update_progress(job.id, status=JobStatus.DONE, sent_files=sent, skipped_files=len(skipped), url="")
     
     if not result.ok:
         summary = (

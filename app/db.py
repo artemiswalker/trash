@@ -126,6 +126,7 @@ class JobStore:
         sent_files: Optional[int] = None,
         skipped_files: Optional[int] = None,
         error: Optional[str] = None,
+        url: Optional[str] = None,
     ) -> None:
         fields, values = [], []
         for col, val in (
@@ -134,6 +135,7 @@ class JobStore:
             ("sent_files", sent_files),
             ("skipped_files", skipped_files),
             ("error", error),
+            ("url", url),
         ):
             if val is not None:
                 fields.append(f"{col} = ?")
