@@ -18,6 +18,23 @@ from .db import Job, JobStatus, JobStore
 from .downloader import GalleryDLNotFound, run_with_progress
 from .uploader import UploadTooLarge, upload_file
 from .middleware import is_job_owner
+from .status import (
+    format_size,
+    make_progress_bar,
+    safe_edit,
+    format_url_display,
+    compile_status_text,
+)
+from . import status
+from .archive import (
+    _archive_ids,
+    _archive_events,
+    _archive_choices,
+    _extracted_archives,
+    ARCHIVE_EXT,
+    extract_archive_async,
+    handle_archive_choice,
+)
 
 log = logging.getLogger("tgdl_bot")
 
@@ -52,17 +69,6 @@ app = Client(
 )
 job_queue: asyncio.Queue[int] = asyncio.Queue()
 _shutdown_event = asyncio.Event()
-_current_job_id: int | None = None
-
-_active_job_metrics: dict[str, any] = {
-    "download_speed": 0.0,
-    "upload_speed": 0.0,
-    "current_download_file": None,
-    "current_upload_file": None,
-    "current_upload_pct": 0.0,
-    "total_downloaded_bytes": 0,
-    "download_count": 0,
-}
 
 
 async def log_upload(job_id: int, filename: str) -> None:
@@ -126,63 +132,9 @@ def format_size(size_bytes: float) -> str:
     return f"{size_bytes:.1f} PB"
 
 
-def make_progress_bar(pct: float) -> str:
-    filled = int(round(pct / 10))
-    bar = "■" * filled + "□" * (10 - filled)
-    return bar
-
-
-_archive_ids = {}      # job_id -> { archive_id: filename }
-_archive_events = {}   # job_id -> { archive_id: asyncio.Event }
-_archive_choices = {}  # job_id -> { archive_id: str }
-_extracted_archives = {}  # job_id -> set of filenames
-ARCHIVE_EXT = {".zip", ".7z", ".rar", ".tar", ".gz", ".bz2", ".xz", ".tgz"}
-
-
-async def extract_archive_async(archive_path: Path, extract_dir: Path) -> bool:
-    import shutil
-    import asyncio
-    loop = asyncio.get_running_loop()
-    try:
-        await loop.run_in_executor(None, shutil.unpack_archive, str(archive_path), str(extract_dir))
-        return True
-    except Exception:
-        pass
-
-    ext = archive_path.suffix.lower()
-    if ext == ".zip" and shutil.which("unzip"):
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "unzip", "-o", str(archive_path), "-d", str(extract_dir),
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL
-            )
-            await proc.wait()
-            if proc.returncode == 0:
-                return True
-        except Exception:
-            pass
-
-    if shutil.which("7z"):
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "7z", "x", "-y", f"-o{extract_dir}", str(archive_path),
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL
-            )
-            await proc.wait()
-            if proc.returncode == 0:
-                return True
-        except Exception:
-            pass
-
-    return False
-
-
 async def process_job(job: Job) -> None:
-    global _current_job_id
-    _current_job_id = job.id
-    _active_job_metrics.update({
+    status._current_job_id = job.id
+    status._active_job_metrics.update({
         "download_speed": 0.0,
         "upload_speed": 0.0,
         "current_download_file": None,
@@ -262,62 +214,17 @@ async def process_job(job: Job) -> None:
 
     async def perform_status_edit() -> bool:
         async with status_lock:
-            parsed_args = []
-            if job.args:
-                try:
-                    import json
-                    parsed_args = json.loads(job.args)
-                except Exception:
-                    pass
-            args_str = " ".join(parsed_args) if parsed_args else "None"
-            split_str = "Yes" if job.split_large_files else "No"
-
-            dl_speed_str = format_size(download_speed)
-            dl_bytes_str = format_size(total_downloaded_bytes)
-
-            dl_file = _active_job_metrics["current_download_file"] if not downloader_done.is_set() else None
-
-            total_files_str = str(download_count) if downloader_done.is_set() else "Calculating"
-
-            status_text = (
-                f"**Active Job Status**\n"
-                f"- **Job ID**: #{job.id}\n"
-                f"- **Status**: `{'Uploading' if downloader_done.is_set() else 'Downloading & Uploading'}`\n"
-                f"- **URL**: {format_url_display(job.url)}\n"
-                f"- **Args**: `{args_str}`\n"
-                f"- **Split > 2GB**: {split_str}\n\n"
-                f"**Downloader Metrics**\n"
+            status_text = compile_status_text(
+                job=job,
+                downloader_done=downloader_done.is_set(),
+                uploader_done=uploader_done.is_set(),
+                download_count=download_count,
+                sent=sent,
+                skipped_len=len(skipped),
+                current_upload_file=current_upload_file,
+                current_upload_pct=current_upload_pct,
+                upload_speed=upload_speed,
             )
-
-            if not downloader_done.is_set():
-                if dl_file:
-                    status_text += f"- **Current File**: `{dl_file}`\n"
-                status_text += (
-                    f"- **Files Downloaded**: {download_count}\n"
-                    f"- **Downloaded Data**: {dl_bytes_str}\n"
-                    f"- **Download Speed**: {dl_speed_str}/s\n\n"
-                )
-            else:
-                status_text += (
-                    f"- **Downloading**: `Complete` (Total: {dl_bytes_str})\n"
-                    f"- **Files Downloaded**: {download_count}\n\n"
-                )
-
-            status_text += (
-                f"**Uploader Metrics**\n"
-                f"- **Files Sent**: {sent} / {total_files_str}\n"
-                f"- **Files Skipped**: {len(skipped)}\n"
-            )
-
-            if current_upload_file:
-                up_speed_str = format_size(upload_speed)
-                bar = make_progress_bar(current_upload_pct)
-                status_text += (
-                    f"- **Current File**: `{current_upload_file}`\n"
-                    f"- **Upload Progress**: {current_upload_pct:.1f}%\n"
-                    f"  `[{bar}]`\n"
-                    f"- **Upload Speed**: {up_speed_str}/s\n"
-                )
 
             if status_text == last_edited_text:
                 return True
@@ -364,7 +271,7 @@ async def process_job(job: Job) -> None:
     def on_progress(count: int, filename: Optional[str] = None) -> None:
         nonlocal download_count
         download_count = count
-        _active_job_metrics["download_count"] = count
+        status._active_job_metrics["download_count"] = count
 
     async def on_upload_progress(current: int, total: int) -> None:
         nonlocal current_upload_pct, upload_speed, last_uploaded_bytes, last_upload_speed_time
@@ -379,10 +286,10 @@ async def process_job(job: Job) -> None:
             upload_speed = 0.7 * speed + 0.3 * upload_speed if last_uploaded_bytes > 0 else speed
             last_uploaded_bytes = current
             last_upload_speed_time = now
-            _active_job_metrics["upload_speed"] = upload_speed
+            status._active_job_metrics["upload_speed"] = upload_speed
 
         current_upload_pct = pct
-        _active_job_metrics["current_upload_pct"] = pct
+        status._active_job_metrics["current_upload_pct"] = pct
 
     async def run_downloader():
         try:
@@ -422,8 +329,8 @@ async def process_job(job: Job) -> None:
                     last_download_size = current_size
                     last_download_time = now
                     total_downloaded_bytes = current_size
-                    _active_job_metrics["download_speed"] = download_speed
-                    _active_job_metrics["total_downloaded_bytes"] = total_downloaded_bytes
+                    status._active_job_metrics["download_speed"] = download_speed
+                    status._active_job_metrics["total_downloaded_bytes"] = total_downloaded_bytes
 
                 current_file = None
                 try:
@@ -433,8 +340,8 @@ async def process_job(job: Job) -> None:
                 except Exception:
                     pass
 
-                if _active_job_metrics.get("current_download_file") != current_file:
-                    _active_job_metrics["current_download_file"] = current_file
+                if status._active_job_metrics.get("current_download_file") != current_file:
+                    status._active_job_metrics["current_download_file"] = current_file
                     trigger_event.set()
 
                 await asyncio.sleep(2)
@@ -561,9 +468,9 @@ async def process_job(job: Job) -> None:
                 upload_speed = 0.0
                 last_uploaded_bytes = 0
                 last_upload_speed_time = time.time()
-                _active_job_metrics["current_upload_file"] = f.name
-                _active_job_metrics["current_upload_pct"] = 0.0
-                _active_job_metrics["upload_speed"] = 0.0
+                status._active_job_metrics["current_upload_file"] = f.name
+                status._active_job_metrics["current_upload_pct"] = 0.0
+                status._active_job_metrics["upload_speed"] = 0.0
                 trigger_event.set()
 
                 await upload_file(app, chat_id, f, progress=on_upload_progress)
@@ -591,9 +498,9 @@ async def process_job(job: Job) -> None:
                 current_upload_file = None
                 current_upload_pct = 0.0
                 upload_speed = 0.0
-                _active_job_metrics["current_upload_file"] = None
-                _active_job_metrics["current_upload_pct"] = 0.0
-                _active_job_metrics["upload_speed"] = 0.0
+                status._active_job_metrics["current_upload_file"] = None
+                status._active_job_metrics["current_upload_pct"] = 0.0
+                status._active_job_metrics["upload_speed"] = 0.0
                 if f.name in uploading_files:
                     uploading_files.remove(f.name)
 
@@ -702,7 +609,7 @@ async def process_job(job: Job) -> None:
         _archive_events.pop(job.id, None)
         _archive_choices.pop(job.id, None)
         _extracted_archives.pop(job.id, None)
-        _current_job_id = None
+        status._current_job_id = None
 
     if not result.ok and sent == 0:
         await store.update_progress(
@@ -739,7 +646,6 @@ async def process_job(job: Job) -> None:
 
 
 async def worker_loop() -> None:
-    global _current_job_id
     while not _shutdown_event.is_set():
         try:
             job_id = await asyncio.wait_for(job_queue.get(), timeout=1.0)
@@ -751,7 +657,7 @@ async def worker_loop() -> None:
         try:
             await process_job(job)
         finally:
-            _current_job_id = None
+            status._current_job_id = None
 
 
 @app.on_message(filters.command("start"))
@@ -777,8 +683,8 @@ async def status_cmd(_, message: Message) -> None:
     import json
     chat_id = message.chat.id
 
-    if _current_job_id is not None:
-        job = await store.get_job(_current_job_id)
+    if status._current_job_id is not None:
+        job = await store.get_job(status._current_job_id)
         if job and is_job_owner(chat_id, job):
             parsed_args = []
             if job.args:
@@ -789,13 +695,13 @@ async def status_cmd(_, message: Message) -> None:
             args_str = " ".join(parsed_args) if parsed_args else "None"
             split_str = "Yes" if job.split_large_files else "No"
 
-            dl_speed = _active_job_metrics["download_speed"]
-            ul_speed = _active_job_metrics["upload_speed"]
-            dl_bytes = _active_job_metrics["total_downloaded_bytes"]
-            dl_count = _active_job_metrics["download_count"]
-            dl_file = _active_job_metrics["current_download_file"]
-            ul_pct = _active_job_metrics["current_upload_pct"]
-            ul_file = _active_job_metrics["current_upload_file"]
+            dl_speed = status._active_job_metrics["download_speed"]
+            ul_speed = status._active_job_metrics["upload_speed"]
+            dl_bytes = status._active_job_metrics["total_downloaded_bytes"]
+            dl_count = status._active_job_metrics["download_count"]
+            dl_file = status._active_job_metrics["current_download_file"]
+            ul_pct = status._active_job_metrics["current_upload_pct"]
+            ul_file = status._active_job_metrics["current_upload_file"]
 
             dl_speed_str = format_size(dl_speed)
             ul_speed_str = format_size(ul_speed)
@@ -877,8 +783,8 @@ async def cancel_cmd(_, message: Message) -> None:
     chat_id = message.chat.id
     active_cancelled = False
 
-    if _current_job_id is not None:
-        job = await store.get_job(_current_job_id)
+    if status._current_job_id is not None:
+        job = await store.get_job(status._current_job_id)
         if job and is_job_owner(chat_id, job):
             await store.update_progress(job.id, status=JobStatus.CANCELLED)
             await message.reply_text(
@@ -1184,46 +1090,8 @@ async def handle_split_choice(_, callback_query: CallbackQuery) -> None:
 
 
 @app.on_callback_query(filters.regex(r"^archive_(only|ext):(\d+):(\d+)$"))
-async def handle_archive_choice(_, callback_query: CallbackQuery) -> None:
-    data = callback_query.data
-    parts = data.split(":")
-    choice = parts[0].split("_")[1] # "only" or "ext"
-    job_id = int(parts[1])
-    archive_id = parts[2]
-
-    job = await store.get_job(job_id)
-    if not job:
-        await callback_query.answer("Job not found.", show_alert=True)
-        return
-
-    if not is_job_owner(callback_query.message.chat.id, job):
-        await callback_query.answer("Unauthorized: You cannot manage archive choices for this job.", show_alert=True)
-        return
-
-    filename = _archive_ids.get(job_id, {}).get(archive_id)
-    if not filename:
-        await callback_query.answer("Archive choice expired or not found.", show_alert=True)
-        return
-
-    # Save choice
-    if job_id not in _archive_choices:
-        _archive_choices[job_id] = {}
-    _archive_choices[job_id][archive_id] = choice
-
-    # Trigger event
-    if job_id in _archive_events and archive_id in _archive_events[job_id]:
-        _archive_events[job_id][archive_id].set()
-
-    # Update message text
-    choice_str = "Upload Archive Only" if choice == "only" else "Upload Archive + Extract Contents"
-    status_text = (
-        f"**Job #{job.id} - Archive Choice**\n"
-        f"- **File**: `{filename}`\n"
-        f"- **Selected**: `{choice_str}`\n\n"
-        f"Processing choice..."
-    )
-    await callback_query.message.edit_text(status_text, link_preview_options=LinkPreviewOptions(is_disabled=True))
-    await callback_query.answer(f"Selected: {choice_str}")
+async def handle_archive_choice_cb(_, callback_query: CallbackQuery) -> None:
+    await handle_archive_choice(callback_query, store, is_job_owner)
 
 
 async def requeue_incomplete_jobs() -> None:
