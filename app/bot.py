@@ -526,15 +526,34 @@ async def process_job(job: Job) -> None:
 
     async def run_uploader() -> None:
         try:
-            while not downloader_done.is_set():
+            while True:
                 if _shutdown_event.is_set():
                     return
                 await perform_uploads()
+
+                # Check if we can stop
+                if downloader_done.is_set():
+                    has_pending = False
+                    if dest_dir.exists():
+                        try:
+                            files = [p for p in dest_dir.rglob("*") if p.is_file() and not p.name.endswith(".part")]
+                            pending = [
+                                f for f in files
+                                if f.name not in uploaded_filenames
+                                and f.name not in uploading_files
+                            ]
+                            if pending:
+                                has_pending = True
+                        except Exception:
+                            pass
+                    if not has_pending:
+                        break
+
                 try:
-                    await asyncio.wait_for(downloader_done.wait(), timeout=5.0)
+                    await asyncio.wait_for(trigger_event.wait(), timeout=5.0)
+                    trigger_event.clear()
                 except asyncio.TimeoutError:
                     pass
-            await perform_uploads()
         finally:
             uploader_done.set()
 
