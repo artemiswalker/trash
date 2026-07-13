@@ -21,9 +21,36 @@ _converted_files: dict[int, set[str]] = {}  # job_id -> set(original_filenames)
 
 
 async def convert_media_async(input_path: Path, output_path: Path) -> bool:
-    """Asynchronously convert video to MP4 container with H.264 video and AAC audio.
-    Uses visually lossless quality settings (-crf 18) to preserve native quality."""
-    cmd = [
+    """Asynchronously convert video to MP4 container.
+    First tries to do a direct stream copy (instant, zero quality loss).
+    If that fails, falls back to transcoding with visually lossless settings (-crf 18)."""
+    # 1. Attempt stream copy
+    copy_cmd = [
+        "ffmpeg", "-y", "-nostdin", "-i", str(input_path),
+        "-c", "copy",
+        str(output_path)
+    ]
+    log.info("Attempting fast stream copy conversion for %s", input_path.name)
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *copy_cmd,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL
+        )
+        returncode = await proc.wait()
+        if returncode == 0:
+            log.info("Fast stream copy conversion successful for %s", input_path.name)
+            return True
+    except Exception:
+        log.exception("Fast stream copy failed for %s", input_path.name)
+
+    # Clean up output if partial/failed copy
+    output_path.unlink(missing_ok=True)
+
+    # 2. Fallback to full transcode
+    log.warning("Fast stream copy failed or unsupported. Falling back to full H.264 transcoding for %s", input_path.name)
+    transcode_cmd = [
         "ffmpeg", "-y", "-nostdin", "-i", str(input_path),
         "-c:v", "libx264", "-preset", "superfast", "-crf", "18",
         "-c:a", "aac", "-b:a", "192k", "-pix_fmt", "yuv420p",
@@ -31,7 +58,7 @@ async def convert_media_async(input_path: Path, output_path: Path) -> bool:
     ]
     try:
         proc = await asyncio.create_subprocess_exec(
-            *cmd,
+            *transcode_cmd,
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL
@@ -39,7 +66,7 @@ async def convert_media_async(input_path: Path, output_path: Path) -> bool:
         returncode = await proc.wait()
         return returncode == 0
     except Exception:
-        log.exception("ffmpeg conversion failed for %s", input_path)
+        log.exception("ffmpeg transcoding fallback failed for %s", input_path)
         return False
 
 
