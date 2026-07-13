@@ -168,7 +168,10 @@ async def upload_file(
             elif ext in VIDEO_EXT:
                 mode = "video"
             elif ext in IMAGE_EXT:
-                mode = "photo"
+                if ext in (".webp", ".gif"):
+                    mode = "document"
+                else:
+                    mode = "photo"
             else:
                 mode = "document"
 
@@ -251,7 +254,11 @@ async def upload_file(
                     err_msg = str(e)
                     is_media_invalid = any(
                         term in err_msg
-                        for term in ("MEDIA_INVALID", "WEBP_REQUIRED", "PHOTO_INVALID", "VIDEO_CONTENT_TYPE_INVALID")
+                        for term in (
+                            "MEDIA_INVALID", "WEBP_REQUIRED", "PHOTO_INVALID",
+                            "VIDEO_CONTENT_TYPE_INVALID", "PHOTO_EXT_INVALID",
+                            "PHOTO_SAVE_FILE_INVALID"
+                        )
                     )
 
                     if is_media_invalid:
