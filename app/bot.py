@@ -351,6 +351,7 @@ async def process_job(job: Job) -> None:
     async def perform_uploads() -> None:
         nonlocal sent, session_uploaded_count, current_upload_file, current_upload_pct
         nonlocal upload_speed, last_uploaded_bytes, last_upload_speed_time, deleted_bytes
+        nonlocal msg_id, last_edited_text
         if not dest_dir.exists():
             return
 
