@@ -198,13 +198,11 @@ async def upload_file(
                 attempt += 1
                 try:
                     if mode == "group":
-                        media = []
-                        video_kwargs = {
-                            "media": str(path),
-                            "caption": path.name,
-                        }
+                        video_kwargs = {"caption": path.name}
                         if thumb_path:
                             video_kwargs["thumb"] = str(thumb_path)
+                        if progress:
+                            video_kwargs["progress"] = progress
                         if "width" in video_meta:
                             video_kwargs["width"] = video_meta["width"]
                         if "height" in video_meta:
@@ -212,23 +210,17 @@ async def upload_file(
                         if "duration" in video_meta:
                             video_kwargs["duration"] = video_meta["duration"]
 
-                        media.append(InputMediaVideo(**video_kwargs))
-                        for shot in screenshots:
-                            media.append(InputMediaPhoto(str(shot)))
+                        log.info("Group mode: Sending video separately first for %s", path.name)
+                        await client.send_video(chat_id, str(path), **video_kwargs)
 
-                        import types
-                        original_save_file = client.save_file
-
-                        async def custom_save_file(client_inst, path_arg, *args, **kwargs):
-                            if str(path_arg) == str(path):
-                                kwargs["progress"] = progress
-                            return await original_save_file(path_arg, *args, **kwargs)
-
-                        client.save_file = types.MethodType(custom_save_file, client)
-                        try:
-                            await client.send_media_group(chat_id, media=media)
-                        finally:
-                            client.save_file = original_save_file
+                        if screenshots:
+                            try:
+                                log.info("Group mode: Sending %s screenshots grouped for %s", len(screenshots), path.name)
+                                media = [InputMediaPhoto(str(shot)) for shot in screenshots]
+                                media[0].caption = f"Screenshots for {path.name}"
+                                await client.send_media_group(chat_id, media=media)
+                            except Exception as se:
+                                log.warning("Failed to send screenshots for %s: %s", path.name, se)
                         return
 
                     elif mode == "video":
