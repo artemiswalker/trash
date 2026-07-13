@@ -18,6 +18,7 @@ A minimal Telegram bot that downloads media albums and videos via `gallery-dl` a
 
 ### Commands
 - `/start` — Display welcome message and instructions.
+- `/gdl` — Reply to the links.txt file containing links.
 - `/status` — View active job status or queue state.
 - `/cancel` — Instantly abort the active job or cancel queued jobs.
 

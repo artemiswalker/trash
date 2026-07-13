@@ -132,6 +132,55 @@ def make_progress_bar(pct: float) -> str:
     return bar
 
 
+_archive_ids = {}      # job_id -> { archive_id: filename }
+_archive_events = {}   # job_id -> { archive_id: asyncio.Event }
+_archive_choices = {}  # job_id -> { archive_id: str }
+_extracted_archives = {}  # job_id -> set of filenames
+ARCHIVE_EXT = {".zip", ".7z", ".rar", ".tar", ".gz", ".bz2", ".xz", ".tgz"}
+
+
+async def extract_archive_async(archive_path: Path, extract_dir: Path) -> bool:
+    import shutil
+    import asyncio
+    # Run shutil.unpack_archive in an executor so it doesn't block the loop
+    loop = asyncio.get_running_loop()
+    try:
+        await loop.run_in_executor(None, shutil.unpack_archive, str(archive_path), str(extract_dir))
+        return True
+    except Exception:
+        pass
+
+    # Fallback to CLI tools
+    ext = archive_path.suffix.lower()
+    if ext == ".zip" and shutil.which("unzip"):
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "unzip", "-o", str(archive_path), "-d", str(extract_dir),
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL
+            )
+            await proc.wait()
+            if proc.returncode == 0:
+                return True
+        except Exception:
+            pass
+
+    if shutil.which("7z"):
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "7z", "x", "-y", f"-o{extract_dir}", str(archive_path),
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL
+            )
+            await proc.wait()
+            if proc.returncode == 0:
+                return True
+        except Exception:
+            pass
+
+    return False
+
+
 async def process_job(job: Job) -> None:
     global _current_job_id
     _current_job_id = job.id
@@ -383,6 +432,76 @@ async def process_job(job: Job) -> None:
             if db_job and db_job.status == JobStatus.CANCELLED:
                 return
 
+            # Check if this file is an archive
+            is_archive = f.suffix.lower() in ARCHIVE_EXT
+            if is_archive:
+                # Find or generate archive_id
+                if job.id not in _archive_ids:
+                    _archive_ids[job.id] = {}
+                archive_id = None
+                for aid, fname in _archive_ids[job.id].items():
+                    if fname == f.name:
+                        archive_id = aid
+                        break
+                if archive_id is None:
+                    archive_id = str(len(_archive_ids[job.id]) + 1)
+                    _archive_ids[job.id][archive_id] = f.name
+
+                # Check if choice exists
+                job_choices = _archive_choices.get(job.id, {})
+                if archive_id not in job_choices:
+                    from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+                    keyboard = InlineKeyboardMarkup([
+                        [
+                            InlineKeyboardButton("Archive Only", callback_data=f"archive_only:{job.id}:{archive_id}"),
+                            InlineKeyboardButton("Archive + Extract", callback_data=f"archive_ext:{job.id}:{archive_id}")
+                        ]
+                    ])
+                    prompt_text = (
+                        f"**Job #{job.id} - Archive Detected**\n"
+                        f"- **File**: `{f.name}`\n\n"
+                        f"Do you want to upload the archive file only, or extract its contents and upload both?"
+                    )
+                    await app.send_message(
+                        chat_id,
+                        prompt_text,
+                        reply_markup=keyboard,
+                        link_preview_options=LinkPreviewOptions(is_disabled=True)
+                    )
+
+                    if job.id not in _archive_events:
+                        _archive_events[job.id] = {}
+                    _archive_events[job.id][archive_id] = asyncio.Event()
+
+                    # Wait for user input
+                    await _archive_events[job.id][archive_id].wait()
+
+                # Choice is now set!
+                choice = _archive_choices[job.id][archive_id]
+                if choice == "ext" and f.name not in _extracted_archives.get(job.id, set()):
+                    if job.id not in _extracted_archives:
+                        _extracted_archives[job.id] = set()
+                    _extracted_archives[job.id].add(f.name)
+
+                    log.info("Extracting archive %s for job %s", f.name, job.id)
+                    extracted = await extract_archive_async(f, dest_dir)
+                    if extracted:
+                        log.info("Successfully extracted archive %s", f.name)
+                        await app.send_message(
+                            chat_id,
+                            f"**Job #{job.id} - Archive Extracted**\nSuccessfully extracted `{f.name}` into download directory.",
+                            link_preview_options=LinkPreviewOptions(is_disabled=True)
+                        )
+                        # Break loop to force re-scanning of extracted files
+                        break
+                    else:
+                        log.error("Failed to extract archive %s", f.name)
+                        await app.send_message(
+                            chat_id,
+                            f"**Job #{job.id} - Extraction Failed**\nFailed to extract `{f.name}`.",
+                            link_preview_options=LinkPreviewOptions(is_disabled=True)
+                        )
+
             max_limit = int(1.95 * 1024 * 1024 * 1024)
             if f.exists() and f.stat().st_size > max_limit:
                 from .uploader import handle_large_file
@@ -529,6 +648,10 @@ async def process_job(job: Job) -> None:
         cancellation_task.cancel()
         updater_task.cancel()
         await asyncio.gather(monitor_task, cancellation_task, updater_task, return_exceptions=True)
+        _archive_ids.pop(job.id, None)
+        _archive_events.pop(job.id, None)
+        _archive_choices.pop(job.id, None)
+        _extracted_archives.pop(job.id, None)
         _current_job_id = None
 
     if not result.ok and sent == 0:
@@ -1008,6 +1131,49 @@ async def handle_split_choice(_, callback_query: CallbackQuery) -> None:
     await callback_query.message.edit_text(status_text, link_preview_options=LinkPreviewOptions(is_disabled=True))
     await callback_query.answer("Choice registered.")
     await job_queue.put(job_id)
+
+
+@app.on_callback_query(filters.regex(r"^archive_(only|ext):(\d+):(\d+)$"))
+async def handle_archive_choice(_, callback_query: CallbackQuery) -> None:
+    data = callback_query.data
+    parts = data.split(":")
+    choice = parts[0].split("_")[1] # "only" or "ext"
+    job_id = int(parts[1])
+    archive_id = parts[2]
+
+    job = await store.get_job(job_id)
+    if not job:
+        await callback_query.answer("Job not found.", show_alert=True)
+        return
+
+    if not is_job_owner(callback_query.message.chat.id, job):
+        await callback_query.answer("Unauthorized: You cannot manage archive choices for this job.", show_alert=True)
+        return
+
+    filename = _archive_ids.get(job_id, {}).get(archive_id)
+    if not filename:
+        await callback_query.answer("Archive choice expired or not found.", show_alert=True)
+        return
+
+    # Save choice
+    if job_id not in _archive_choices:
+        _archive_choices[job_id] = {}
+    _archive_choices[job_id][archive_id] = choice
+
+    # Trigger event
+    if job_id in _archive_events and archive_id in _archive_events[job_id]:
+        _archive_events[job_id][archive_id].set()
+
+    # Update message text
+    choice_str = "Upload Archive Only" if choice == "only" else "Upload Archive + Extract Contents"
+    status_text = (
+        f"**Job #{job.id} - Archive Choice**\n"
+        f"- **File**: `{filename}`\n"
+        f"- **Selected**: `{choice_str}`\n\n"
+        f"Processing choice..."
+    )
+    await callback_query.message.edit_text(status_text, link_preview_options=LinkPreviewOptions(is_disabled=True))
+    await callback_query.answer(f"Selected: {choice_str}")
 
 
 async def requeue_incomplete_jobs() -> None:

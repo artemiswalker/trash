@@ -248,7 +248,6 @@ async def upload_file(
                     log.warning("FloodWait %ss on %s", e.value, path.name)
                     await asyncio.sleep(e.value + 1)
                 except RPCError as e:
-                    # Check if error indicates invalid/unsupported media type
                     err_msg = str(e)
                     is_media_invalid = any(
                         term in err_msg
