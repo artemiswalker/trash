@@ -23,7 +23,6 @@ class Settings(BaseSettings):
     gdl_sleep_request: str = "1-3"
     gdl_limit_rate: str = "3M"
     gdl_retries: int = 4
-    gdl_run_timeout_s: int = 3 * 3600
 
     # --- adaptive backoff on rate-limit signals ---
     gdl_max_run_retries: int = 3

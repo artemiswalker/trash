@@ -145,19 +145,8 @@ async def run_with_progress(
                     stderr_buf.append(line.decode(errors="replace"))
 
             try:
-                await asyncio.wait_for(
-                    asyncio.gather(pump_stdout(), pump_stderr()),
-                    timeout=settings.gdl_run_timeout_s,
-                )
+                await asyncio.gather(pump_stdout(), pump_stderr())
                 returncode = await proc.wait()
-            except asyncio.TimeoutError:
-                try:
-                    proc.kill()
-                    await proc.wait()
-                except Exception:
-                    pass
-                last_stderr = f"gallery-dl timed out after {settings.gdl_run_timeout_s}s"
-                returncode = 1
             except asyncio.CancelledError:
                 try:
                     proc.terminate()
