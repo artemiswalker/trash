@@ -147,13 +147,6 @@ async def upload_file(
         raise UploadTooLarge(f"{path.name} is {size / 1e9:.2f}GB, exceeds 2GB MTProto limit")
 
     ext = path.suffix.lower()
-    if ext in IMAGE_EXT:
-        send = lambda c, p, **kw: client.send_photo(c, p, **kw)
-    elif ext in VIDEO_EXT:
-        send = lambda c, p, **kw: client.send_video(c, p, **kw)
-    else:
-        send = lambda c, p, **kw: client.send_document(c, p, **kw)
-
     thumb_path = None
     screenshots: list[Path] = []
     video_meta = {}
@@ -169,13 +162,22 @@ async def upload_file(
 
     try:
         async with _upload_semaphore:
+            # Determine initial upload mode
+            if ext in VIDEO_EXT and screenshots:
+                mode = "group"
+            elif ext in VIDEO_EXT:
+                mode = "video"
+            elif ext in IMAGE_EXT:
+                mode = "photo"
+            else:
+                mode = "document"
+
             attempt = 0
             while True:
                 attempt += 1
                 try:
-                    if ext in VIDEO_EXT and screenshots:
+                    if mode == "group":
                         media = []
-                        # Add video first so it is the cover and caption holder
                         video_kwargs = {
                             "media": str(path),
                             "caption": path.name,
@@ -190,12 +192,9 @@ async def upload_file(
                             video_kwargs["duration"] = video_meta["duration"]
 
                         media.append(InputMediaVideo(**video_kwargs))
-
-                        # Add screenshots after the video
                         for shot in screenshots:
                             media.append(InputMediaPhoto(str(shot)))
 
-                        # Dynamically patch save_file to track upload progress of the video file
                         import types
                         original_save_file = client.save_file
 
@@ -209,33 +208,76 @@ async def upload_file(
                             await client.send_media_group(chat_id, media=media)
                         finally:
                             client.save_file = original_save_file
-                    else:
+                        return
+
+                    elif mode == "video":
+                        kwargs = {"caption": path.name}
+                        if thumb_path:
+                            kwargs["thumb"] = str(thumb_path)
+                        if progress:
+                            kwargs["progress"] = progress
+                        if "width" in video_meta:
+                            kwargs["width"] = video_meta["width"]
+                        if "height" in video_meta:
+                            kwargs["height"] = video_meta["height"]
+                        if "duration" in video_meta:
+                            kwargs["duration"] = video_meta["duration"]
+
+                        await client.send_video(chat_id, str(path), **kwargs)
+                        return
+
+                    elif mode == "photo":
+                        kwargs = {"caption": path.name}
+                        if progress:
+                            kwargs["progress"] = progress
+
+                        await client.send_photo(chat_id, str(path), **kwargs)
+                        return
+
+                    else:  # document mode
                         kwargs = {"caption": path.name}
                         if thumb_path:
                             kwargs["thumb"] = str(thumb_path)
                         if progress:
                             kwargs["progress"] = progress
 
-                        if ext in VIDEO_EXT:
-                            if "width" in video_meta:
-                                kwargs["width"] = video_meta["width"]
-                            if "height" in video_meta:
-                                kwargs["height"] = video_meta["height"]
-                            if "duration" in video_meta:
-                                kwargs["duration"] = video_meta["duration"]
+                        await client.send_document(chat_id, str(path), **kwargs)
+                        return
 
-                        await send(chat_id, str(path), **kwargs)
-                    return
                 except FloodWait as e:
                     log.warning("FloodWait %ss on %s", e.value, path.name)
                     await asyncio.sleep(e.value + 1)
-                except RPCError:
+                except RPCError as e:
+                    # Check if error indicates invalid/unsupported media type
+                    err_msg = str(e)
+                    is_media_invalid = any(
+                        term in err_msg
+                        for term in ("MEDIA_INVALID", "WEBP_REQUIRED", "PHOTO_INVALID", "VIDEO_CONTENT_TYPE_INVALID")
+                    )
+
+                    if is_media_invalid:
+                        if mode == "group":
+                            log.warning("Media group upload failed with MediaInvalid for %s. Falling back to standalone video upload.", path.name)
+                            mode = "video"
+                            attempt = 0
+                            continue
+                        elif mode == "video":
+                            log.warning("Video upload failed with MediaInvalid for %s. Falling back to document upload.", path.name)
+                            mode = "document"
+                            attempt = 0
+                            continue
+                        elif mode == "photo":
+                            log.warning("Photo upload failed with MediaInvalid for %s. Falling back to document upload.", path.name)
+                            mode = "document"
+                            attempt = 0
+                            continue
+
                     if attempt >= settings.tg_upload_max_retries:
                         raise
                     delay = 2**attempt
                     log.warning(
-                        "Upload error on %s (attempt %s), retrying in %ss",
-                        path.name, attempt, delay,
+                        "Upload error on %s (attempt %s, mode %s): %s. Retrying in %ss",
+                        path.name, attempt, mode, e, delay,
                     )
                     await asyncio.sleep(delay)
     finally:
