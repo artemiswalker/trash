@@ -35,6 +35,15 @@ from .archive import (
     extract_archive_async,
     handle_archive_choice,
 )
+from .conversion import (
+    _conversion_ids,
+    _conversion_events,
+    _conversion_choices,
+    _converted_files,
+    CONVERSION_EXT,
+    convert_media_async,
+    handle_conversion_choice,
+)
 
 log = logging.getLogger("tgdl_bot")
 
@@ -463,6 +472,78 @@ async def process_job(job: Job) -> None:
                             link_preview_options=LinkPreviewOptions(is_disabled=True)
                         )
 
+            # Check if this file needs conversion
+            is_incompatible = f.suffix.lower() in CONVERSION_EXT
+            if is_incompatible and f.name not in _converted_files.get(job.id, set()):
+                if job.id not in _conversion_ids:
+                    _conversion_ids[job.id] = {}
+                conv_id = None
+                for cid, fname in _conversion_ids[job.id].items():
+                    if fname == f.name:
+                        conv_id = cid
+                        break
+                if conv_id is None:
+                    conv_id = str(len(_conversion_ids[job.id]) + 1)
+                    _conversion_ids[job.id][conv_id] = f.name
+
+                job_choices = _conversion_choices.get(job.id, {})
+                if conv_id not in job_choices:
+                    from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+                    keyboard = InlineKeyboardMarkup([
+                        [
+                            InlineKeyboardButton("Convert to MP4", callback_data=f"convert_mp4:{job.id}:{conv_id}"),
+                            InlineKeyboardButton("Original File", callback_data=f"convert_orig:{job.id}:{conv_id}")
+                        ]
+                    ])
+                    prompt_text = (
+                        f"**Job #{job.id} - Incompatible Video Format**\n"
+                        f"- **File**: `{f.name}`\n\n"
+                        f"The file format is not natively supported for Telegram inline streaming. "
+                        f"Do you want to convert it to MP4 first, or upload the original as a document?"
+                    )
+                    await app.send_message(
+                        chat_id,
+                        prompt_text,
+                        reply_markup=keyboard,
+                        link_preview_options=LinkPreviewOptions(is_disabled=True)
+                    )
+
+                    if job.id not in _conversion_events:
+                        _conversion_events[job.id] = {}
+                    _conversion_events[job.id][conv_id] = asyncio.Event()
+
+                    await _conversion_events[job.id][conv_id].wait()
+
+                choice = _conversion_choices[job.id][conv_id]
+                if choice == "mp4":
+                    if job.id not in _converted_files:
+                        _converted_files[job.id] = set()
+                    _converted_files[job.id].add(f.name)
+
+                    log.info("Converting video %s to MP4 for job %s", f.name, job.id)
+                    output_name = f.stem + "_converted.mp4"
+                    output_path = f.parent / output_name
+
+                    await app.send_message(
+                        chat_id,
+                        f"**Job #{job.id} - Media Conversion**\nConverting `{f.name}` to standard MP4 container...",
+                        link_preview_options=LinkPreviewOptions(is_disabled=True)
+                    )
+
+                    success = await convert_media_async(f, output_path)
+                    if success:
+                        log.info("Successfully converted video %s to %s", f.name, output_name)
+                        f.unlink(missing_ok=True)
+                        break
+                    else:
+                        log.error("Failed to convert video %s", f.name)
+                        await app.send_message(
+                            chat_id,
+                            f"**Job #{job.id} - Conversion Failed**\nFailed to convert `{f.name}`. Uploading original as document.",
+                            link_preview_options=LinkPreviewOptions(is_disabled=True)
+                        )
+                        _conversion_choices[job.id][conv_id] = "orig"
+
             max_limit = int(1.95 * 1024 * 1024 * 1024)
             if f.exists() and f.stat().st_size > max_limit:
                 from .uploader import handle_large_file
@@ -646,6 +727,10 @@ async def process_job(job: Job) -> None:
         _archive_events.pop(job.id, None)
         _archive_choices.pop(job.id, None)
         _extracted_archives.pop(job.id, None)
+        _conversion_ids.pop(job.id, None)
+        _conversion_events.pop(job.id, None)
+        _conversion_choices.pop(job.id, None)
+        _converted_files.pop(job.id, None)
         status._current_job_id = None
 
     if not result.ok and sent == 0:
@@ -1129,6 +1214,11 @@ async def handle_split_choice(_, callback_query: CallbackQuery) -> None:
 @app.on_callback_query(filters.regex(r"^archive_(only|ext):(\d+):(\d+)$"))
 async def handle_archive_choice_cb(_, callback_query: CallbackQuery) -> None:
     await handle_archive_choice(callback_query, store, is_job_owner)
+
+
+@app.on_callback_query(filters.regex(r"^convert_(mp4|orig):(\d+):(\d+)$"))
+async def handle_conversion_choice_cb(client: Client, callback_query: CallbackQuery) -> None:
+    await handle_conversion_choice(client, callback_query, store, is_job_owner)
 
 
 async def requeue_incomplete_jobs() -> None:
