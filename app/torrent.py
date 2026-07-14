@@ -12,7 +12,7 @@ from .downloader import DownloadResult
 log = logging.getLogger(__name__)
 
 PROGRESS_RE = re.compile(
-    r"\[#\w+\s+([^\s/]+)/([^\s(]+)\((\d+)%\)\s+CN:\d+\s+(?:SPD|DL):([^\s\]]+)\]"
+    r"\[#\w+\s+([^\s/]+)/([^\s(]+)\((\d+)%\)\s+CN:\d+\s+(?:SPD|DL):([0-9.]+[a-zA-Z/]*)"
 )
 
 TRACKERS = [
@@ -80,6 +80,8 @@ async def download_torrent_async(
         f"--dir={dest_dir}",
         "--seed-time=0",
         "--seed-ratio=0.0",
+        "--bt-tracker-connect-timeout=10",
+        "--bt-tracker-timeout=10",
         "--summary-interval=1",
         "--follow-torrent=mem",
         "--enable-dht=true",
@@ -107,14 +109,17 @@ async def download_torrent_async(
         register_proc(proc)
 
     stderr_chunks: list[str] = []
+    grace_terminate_started = False
 
     async def read_stdout():
+        nonlocal grace_terminate_started
         assert proc.stdout is not None
         async for line in proc.stdout:
             text = line.decode(errors="replace").strip()
             if not text:
                 continue
 
+            is_complete = False
             match = PROGRESS_RE.search(text)
             if match:
                 downloaded_str = match.group(1)
@@ -123,6 +128,8 @@ async def download_torrent_async(
 
                 try:
                     pct = float(pct_str)
+                    if pct >= 100.0:
+                        is_complete = True
                     downloaded_bytes = parse_speed_to_bytes(downloaded_str)
                     speed_bytes = parse_speed_to_bytes(speed_str)
 
@@ -130,6 +137,19 @@ async def download_torrent_async(
                         on_progress(pct, downloaded_bytes, speed_bytes)
                 except Exception:
                     pass
+
+            if ("download complete" in text.lower() or is_complete) and not grace_terminate_started:
+                grace_terminate_started = True
+                log.info("Detected download complete in aria2c output, scheduling termination...")
+                async def grace_terminate():
+                    await asyncio.sleep(4.0)
+                    if proc.returncode is None:
+                        log.info("aria2c did not exit after download complete; terminating process")
+                        try:
+                            proc.terminate()
+                        except Exception:
+                            pass
+                asyncio.create_task(grace_terminate())
 
     async def read_stderr():
         assert proc.stderr is not None
