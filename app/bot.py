@@ -11,7 +11,7 @@ from pathlib import Path
 
 from pyrogram import Client, filters, idle
 from pyrogram.enums import ChatType
-from pyrogram.types import Message, CallbackQuery, LinkPreviewOptions
+from pyrogram.types import Message, CallbackQuery, LinkPreviewOptions, ForceReply
 
 from .config import settings
 from .db import Job, JobStatus, JobStore
@@ -90,6 +90,8 @@ app = Client(
 )
 job_queue: asyncio.Queue[int] = asyncio.Queue()
 _shutdown_event = asyncio.Event()
+_password_prompt_events: dict[int, dict[str, tuple[asyncio.Event, dict]]] = {}
+_password_prompt_messages: dict[int, tuple[int, str, int]] = {}
 
 
 async def log_upload(job_id: int, filename: str) -> None:
@@ -442,7 +444,7 @@ async def process_job(job: Job) -> None:
     async def perform_uploads() -> None:
         nonlocal sent, session_uploaded_count, current_upload_file, current_upload_pct
         nonlocal upload_speed, last_uploaded_bytes, last_upload_speed_time, deleted_bytes
-        nonlocal msg_id, last_edited_text
+        nonlocal msg_id, last_edited_text, job
         if not dest_dir.exists():
             return
 
@@ -630,20 +632,63 @@ async def process_job(job: Job) -> None:
                                 await app.delete_messages(chat_id, status_msg.id)
                         except Exception:
                             pass
-                        await safe_send(
+                        
+                        prompt_msg = await safe_send(
                             chat_id,
                             f"**Password Required**: `{f.name}` is password-protected or password was incorrect.\n\n"
-                            f"Please reply to the original archive file with:\n"
-                            f"`/unzip <password>`\n"
-                            f"to extract and upload its contents.",
-                            link_preview_options=LinkPreviewOptions(is_disabled=True)
+                            f"Please reply directly to this message with the password to extract it.",
+                            reply_markup=ForceReply(placeholder="Enter archive password")
                         )
-                        if archive_prompt_msg_id:
+                        if prompt_msg:
+                            if job.id not in _password_prompt_events:
+                                _password_prompt_events[job.id] = {}
+                            event = asyncio.Event()
+                            data = {"password": None}
+                            _password_prompt_events[job.id][archive_id] = (event, data)
+                            _password_prompt_messages[prompt_msg.id] = (job.id, archive_id, chat_id)
+                            
                             try:
-                                await app.delete_messages(chat_id, archive_prompt_msg_id)
-                            except Exception:
-                                pass
-                        raise
+                                await asyncio.wait_for(event.wait(), timeout=300) # 5 mins timeout
+                                new_password = data["password"]
+                                
+                                import json
+                                job_args_dict = {}
+                                if job.args:
+                                    try:
+                                        job_args_dict = json.loads(job.args)
+                                    except Exception:
+                                        pass
+                                job_args_dict["password"] = new_password
+                                await store.db.execute(
+                                    "UPDATE jobs SET args = ? WHERE id = ?",
+                                    (json.dumps(job_args_dict), job.id)
+                                )
+                                await store.db.commit()
+                                
+                                job = await store.get_job(job.id)
+                                
+                                try:
+                                    await app.delete_messages(chat_id, prompt_msg.id)
+                                except Exception:
+                                    pass
+                                
+                                # Break out to retry extraction
+                                break
+                            except asyncio.TimeoutError:
+                                try:
+                                    await app.delete_messages(chat_id, prompt_msg.id)
+                                except Exception:
+                                    pass
+                                await safe_send(
+                                    chat_id,
+                                    f"❌ **Job #{job.id} aborted**: Timeout waiting for password for `{f.name}`."
+                                )
+                                raise Exception(f"Timeout waiting for password for {f.name}")
+                            finally:
+                                _password_prompt_events.get(job.id, {}).pop(archive_id, None)
+                                _password_prompt_messages.pop(prompt_msg.id, None)
+                        else:
+                            raise
                     except Exception:
                         try:
                             await app.delete_messages(chat_id, status_msg.id)
@@ -964,6 +1009,10 @@ async def process_job(job: Job) -> None:
         _conversion_events.pop(job.id, None)
         _conversion_choices.pop(job.id, None)
         _converted_files.pop(job.id, None)
+        _password_prompt_events.pop(job.id, None)
+        to_remove = [mid for mid, info in _password_prompt_messages.items() if info[0] == job.id]
+        for mid in to_remove:
+            _password_prompt_messages.pop(mid, None)
         status._current_job_id = None
 
     if not result.ok and sent == 0:
@@ -1487,6 +1536,39 @@ def sanitize_gdl_args(args: list[str], url: Optional[str | list[str]] = None) ->
 
         sanitized.append(arg)
     return sanitized
+
+
+@app.on_message(filters.reply & filters.text, group=-1)
+async def handle_password_reply(_, message: Message) -> None:
+    reply = message.reply_to_message
+    if not reply or not reply.id:
+        return
+    
+    prompt_info = _password_prompt_messages.get(reply.id)
+    if not prompt_info:
+        return
+        
+    message.stop_propagation()
+    
+    job_id, archive_id, chat_id = prompt_info
+    
+    job = await store.get_job(job_id)
+    if not job or not is_job_owner(message.chat.id, job):
+        return
+
+    password = message.text.strip()
+    
+    if job_id in _password_prompt_events and archive_id in _password_prompt_events[job_id]:
+        event, data = _password_prompt_events[job_id][archive_id]
+        data["password"] = password
+        event.set()
+        
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    
+    _password_prompt_messages.pop(reply.id, None)
 
 
 @app.on_message(filters.text & ~filters.command(["start", "status", "cancel", "gdl", "tor", "unzip"]))
