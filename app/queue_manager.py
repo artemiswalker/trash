@@ -93,6 +93,13 @@ class QueueManager:
         num_dl = settings.tg_max_concurrent_downloads
         num_ul = settings.tg_max_concurrent_uploads
         
+        # Start the global aria2c daemon
+        try:
+            from .torrent import start_aria2_daemon
+            await start_aria2_daemon()
+        except Exception as e:
+            log.error("Failed to start global aria2c daemon at QueueManager startup: %s", e)
+
         for i in range(num_dl):
             self.download_workers.append(asyncio.create_task(self._download_worker_loop(i)))
         for i in range(num_ul):
@@ -110,7 +117,16 @@ class QueueManager:
             await self.cancel_job(job_id)
         self.download_workers.clear()
         self.upload_workers.clear()
+        
+        # Stop the global aria2c daemon
+        try:
+            from .torrent import stop_aria2_daemon
+            await stop_aria2_daemon()
+        except Exception as e:
+            log.error("Failed to stop global aria2c daemon at QueueManager shutdown: %s", e)
+
         log.info("Queue manager stopped")
+
 
     async def add_job(self, job_id: int) -> None:
         await self.download_queue.put(job_id)
