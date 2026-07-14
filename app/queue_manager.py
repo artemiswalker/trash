@@ -204,6 +204,9 @@ class QueueManager:
             )
             is_unzip = job.url.startswith("unzip:")
 
+            def reg(proc):
+                job_state.active_process = proc
+
             if is_unzip:
                 from .downloader import DownloadResult
                 archive_files = []
@@ -218,7 +221,7 @@ class QueueManager:
 
                 from .torrent import download_torrent_async
                 result = await download_torrent_async(
-                    job.url, dest_dir, on_progress=on_torrent_progress
+                    job.url, dest_dir, on_progress=on_torrent_progress, register_proc=reg
                 )
             else:
                 extra_args = None
@@ -237,7 +240,7 @@ class QueueManager:
 
                 from .downloader import run_with_progress
                 result = await run_with_progress(
-                    job.url, dest_dir, on_progress=on_download_progress, extra_args=extra_args
+                    job.url, dest_dir, on_progress=on_download_progress, extra_args=extra_args, register_proc=reg
                 )
 
             job_state.downloader_result = result

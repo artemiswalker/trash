@@ -57,9 +57,6 @@ async def _stream_run(cmd: list[str]) -> tuple[int, str, Callable[[], int]]:
         stderr=asyncio.subprocess.PIPE,
     )
 
-    from . import status
-    status._active_process = proc
-
     count = 0
     stderr_chunks: list[str] = []
 
@@ -90,8 +87,6 @@ async def _stream_run(cmd: list[str]) -> tuple[int, str, Callable[[], int]]:
         except Exception:
             pass
         raise
-    finally:
-        status._active_process = None
 
 
 async def run_with_progress(
@@ -99,6 +94,7 @@ async def run_with_progress(
     dest_dir: Path,
     on_progress: Optional[Callable[[int, Optional[str]], None]] = None,
     extra_args: Optional[list[str]] = None,
+    register_proc: Optional[Callable[[asyncio.subprocess.Process], None]] = None,
 ) -> DownloadResult:
 
     if shutil.which("gallery-dl") is None:
@@ -138,8 +134,8 @@ async def run_with_progress(
             proc = await asyncio.create_subprocess_exec(
                 *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
             )
-            from . import status
-            status._active_process = proc
+            if register_proc:
+                register_proc(proc)
 
             count = 0
             stderr_buf: list[str] = []
@@ -168,7 +164,8 @@ async def run_with_progress(
                     pass
                 raise
             finally:
-                status._active_process = None
+                if register_proc:
+                    register_proc(None)
 
             last_stderr = last_stderr or "".join(stderr_buf)[-3000:]
 

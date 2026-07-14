@@ -26,7 +26,7 @@ VIDEO_EXT = {
     ".3gp", ".mpeg", ".mpg", ".m4v", ".ts", ".f4v"
 }
 
-_upload_semaphore = asyncio.Semaphore(settings.tg_max_concurrent_uploads)
+_upload_semaphore = asyncio.Semaphore(1)
 
 
 class UploadTooLarge(Exception):

@@ -63,6 +63,7 @@ async def download_torrent_async(
     torrent_or_magnet: str,
     dest_dir: Path,
     on_progress: Optional[Callable[[float, float, float], None]] = None,
+    register_proc: Optional[Callable[[asyncio.subprocess.Process], None]] = None,
 ) -> DownloadResult:
     """Download a torrent or magnet link asynchronously using aria2c."""
     if shutil.which("aria2c") is None:
@@ -102,8 +103,8 @@ async def download_torrent_async(
         log.exception("Failed to start aria2c for torrent %s", target)
         return DownloadResult(ok=False, error_tail=f"Failed to start aria2c: {e}")
 
-    from . import status
-    status._active_process = proc
+    if register_proc:
+        register_proc(proc)
 
     stderr_chunks: list[str] = []
 
@@ -149,7 +150,8 @@ async def download_torrent_async(
             pass
         raise
     finally:
-        status._active_process = None
+        if register_proc:
+            register_proc(None)
 
     ok = returncode == 0
     error_tail = "".join(stderr_chunks)

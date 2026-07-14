@@ -23,7 +23,6 @@ from .status import (
     make_progress_bar,
     safe_edit,
     format_url_display,
-    compile_status_text,
     compile_split_prompt_text,
     compile_queued_status_text,
     compile_unzip_download_status_text,
