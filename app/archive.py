@@ -20,65 +20,73 @@ ARCHIVE_EXT = {".zip", ".7z", ".rar", ".tar", ".gz", ".bz2", ".xz", ".tgz"}
 
 
 async def extract_archive_async(archive_path: Path, extract_dir: Path) -> bool:
-    loop = asyncio.get_running_loop()
-    try:
-        await loop.run_in_executor(None, shutil.unpack_archive, str(archive_path), str(extract_dir))
-        return True
-    except Exception:
-        pass
-
     ext = archive_path.suffix.lower()
+
+    # 1. Try native commands first for speed and robustness
     if ext == ".zip" and shutil.which("unzip"):
         try:
+            log.info("Extracting %s using unzip command line tool", archive_path.name)
             proc = await asyncio.create_subprocess_exec(
                 "unzip", "-o", str(archive_path), "-d", str(extract_dir),
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL
             )
             await proc.wait()
             if proc.returncode == 0:
                 return True
+            log.warning("unzip command returned non-zero code: %s", proc.returncode)
         except Exception:
-            pass
+            log.exception("unzip command failed")
 
     if ext == ".rar" and shutil.which("unrar"):
         try:
+            log.info("Extracting %s using unrar command line tool", archive_path.name)
             proc = await asyncio.create_subprocess_exec(
                 "unrar", "x", "-y", str(archive_path), str(extract_dir),
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL
             )
             await proc.wait()
             if proc.returncode == 0:
                 return True
+            log.warning("unrar command returned non-zero code: %s", proc.returncode)
         except Exception:
-            pass
+            log.exception("unrar command failed")
 
     if ext in (".tar", ".gz", ".bz2", ".xz", ".tgz", ".tbz2", ".txz") and shutil.which("tar"):
         try:
+            log.info("Extracting %s using tar command line tool", archive_path.name)
             proc = await asyncio.create_subprocess_exec(
                 "tar", "-xf", str(archive_path), "-C", str(extract_dir),
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL
             )
             await proc.wait()
             if proc.returncode == 0:
                 return True
+            log.warning("tar command returned non-zero code: %s", proc.returncode)
         except Exception:
-            pass
+            log.exception("tar command failed")
 
+    # If the format-specific tool wasn't found or failed, try 7z which supports almost everything
     if shutil.which("7z"):
         try:
+            log.info("Extracting %s using 7z command line tool", archive_path.name)
             proc = await asyncio.create_subprocess_exec(
                 "7z", "x", "-y", f"-o{extract_dir}", str(archive_path),
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL
             )
             await proc.wait()
             if proc.returncode == 0:
                 return True
+            log.warning("7z command returned non-zero code: %s", proc.returncode)
         except Exception:
-            pass
+            log.exception("7z command failed")
 
     return False
 
