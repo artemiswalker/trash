@@ -90,12 +90,22 @@ async def probe_video(video_path: Path) -> dict[str, int]:
                 k = k.strip()
                 v = v.strip()
                 if k == "width":
-                    info["width"] = int(v)
+                    try:
+                        info["width"] = int(v)
+                    except ValueError:
+                        pass
                 elif k == "height":
-                    info["height"] = int(v)
+                    try:
+                        info["height"] = int(v)
+                    except ValueError:
+                        pass
                 elif k == "duration":
-                    info["duration"] = int(round(float(v)))
+                    try:
+                        info["duration"] = int(round(float(v)))
+                    except ValueError:
+                        pass
         return info
+
     except Exception:
         log.exception("Failed to probe video %s", video_path)
         return {}
