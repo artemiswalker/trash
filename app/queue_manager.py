@@ -77,6 +77,11 @@ class QueueManager:
         self.download_workers: list[asyncio.Task] = []
         self.upload_workers: list[asyncio.Task] = []
         self.is_running = False
+        self.upload_delay_multiplier = 1.0
+
+    def notify_floodwait(self, seconds: int) -> None:
+        self.upload_delay_multiplier = min(self.upload_delay_multiplier + 1.0, 5.0)
+        log.warning("Uploader hit FloodWait. Increased upload delay multiplier to %.1f", self.upload_delay_multiplier)
 
     async def start(self, client: Client, store: JobStore) -> None:
         self.client = client
@@ -319,13 +324,15 @@ class QueueManager:
                     if job_state.msg_id:
                         from .status import compile_job_status_text
                         status_text = compile_job_status_text(db_job, job_state)
-                        if await safe_edit(self.client, chat_id, job_state.msg_id, status_text):
-                            if getattr(job_state, "initial_download_msg", None):
-                                try:
-                                    await self.client.delete_messages(chat_id, job_state.initial_download_msg.id)
-                                    job_state.initial_download_msg = None
-                                except Exception:
-                                    pass
+                        if status_text != job_state.last_edited_text:
+                            if await safe_edit(self.client, chat_id, job_state.msg_id, status_text):
+                                job_state.last_edited_text = status_text
+                                if getattr(job_state, "initial_download_msg", None):
+                                    try:
+                                        await self.client.delete_messages(chat_id, job_state.initial_download_msg.id)
+                                        job_state.initial_download_msg = None
+                                    except Exception:
+                                        pass
                 except Exception:
                     pass
 
@@ -638,13 +645,15 @@ class QueueManager:
                 await self.store.update_progress(job.id, sent_files=job_state.sent, skipped_files=len(job_state.skipped))
                 job_state.trigger_event.set()
 
+                # Decay delay multiplier slowly on successful upload
+                self.upload_delay_multiplier = max(self.upload_delay_multiplier - 0.05, 1.0)
+
                 job_state.session_uploaded_count += 1
                 if job_state.session_uploaded_count % settings.tg_batch_size == 0:
-                    await asyncio.sleep(settings.tg_batch_cooldown_s)
+                    await asyncio.sleep(settings.tg_batch_cooldown_s * self.upload_delay_multiplier)
                 else:
-                    await asyncio.sleep(
-                        random.uniform(settings.tg_upload_delay_min, settings.tg_upload_delay_max)
-                    )
+                    delay = random.uniform(settings.tg_upload_delay_min, settings.tg_upload_delay_max) * self.upload_delay_multiplier
+                    await asyncio.sleep(delay)
 
         async def run_uploader() -> None:
             while not job_state.downloader_done.is_set():
