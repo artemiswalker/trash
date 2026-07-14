@@ -69,7 +69,7 @@ async def convert_media_async(input_path: Path, output_path: Path) -> bool:
 
 async def handle_conversion_choice(client: Client, callback_query: CallbackQuery, store, is_job_owner) -> None:
     data = callback_query.data
-    parts = data.split(":")
+    parts = data.split(":", 2)
     choice = parts[0]  
     job_id = int(parts[1])
     conv_id = parts[2]

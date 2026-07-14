@@ -131,7 +131,7 @@ async def handle_archive_choice(
     is_job_owner
 ) -> None:
     data = callback_query.data
-    parts = data.split(":")
+    parts = data.split(":", 2)
     choice = parts[0].split("_")[1]  
     job_id = int(parts[1])
     archive_id = parts[2]

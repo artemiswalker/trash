@@ -827,12 +827,12 @@ async def handle_split_choice(_, callback_query: CallbackQuery) -> None:
     await queue_manager.add_job(job_id)
 
 
-@app.on_callback_query(filters.regex(r"^archive_(only|ext):(\d+):(\d+)$"))
+@app.on_callback_query(filters.regex(r"^archive_(only|ext):(\d+):(.+)$"))
 async def handle_archive_choice_cb(_, callback_query: CallbackQuery) -> None:
     await handle_archive_choice(callback_query, store, is_job_owner)
 
 
-@app.on_callback_query(filters.regex(r"^convert_(mp4|orig):(\d+):(\d+)$"))
+@app.on_callback_query(filters.regex(r"^convert_(mp4|orig):(\d+):(.+)$"))
 async def handle_conversion_choice_cb(client: Client, callback_query: CallbackQuery) -> None:
     await handle_conversion_choice(client, callback_query, store, is_job_owner)
 
