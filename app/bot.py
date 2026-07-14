@@ -145,6 +145,20 @@ async def safe_edit(chat_id: int, message_id: int, text: str) -> bool:
         return False
 
 
+async def safe_send(chat_id: int, text: str, **kwargs) -> Message | None:
+    from pyrogram.errors import FloodWait
+    for _ in range(3):
+        try:
+            return await app.send_message(chat_id, text, **kwargs)
+        except FloodWait as e:
+            log.warning("Telegram FloodWait: waiting %s seconds on send", e.value)
+            await asyncio.sleep(e.value + 1)
+        except Exception as e:
+            log.warning("Failed to send message: %s", e)
+            return None
+    return None
+
+
 def format_size(size_bytes: float) -> str:
     for unit in ["B", "KB", "MB", "GB", "TB"]:
         if size_bytes < 1024.0:
@@ -515,7 +529,7 @@ async def process_job(job: Job) -> None:
                     _extracted_archives[job.id].add(f_rel)
 
                     log.info("Extracting archive %s for job %s", f.name, job.id)
-                    status_msg = await app.send_message(
+                    status_msg = await safe_send(
                         chat_id,
                         compile_extraction_status_text(job.id, f.name),
                         link_preview_options=LinkPreviewOptions(is_disabled=True)
@@ -563,11 +577,12 @@ async def process_job(job: Job) -> None:
                                 except Exception:
                                     pass
                             try:
-                                await app.delete_messages(chat_id, status_msg.id)
+                                if status_msg:
+                                    await app.delete_messages(chat_id, status_msg.id)
                             except Exception:
                                 pass
 
-                            success_msg = await app.send_message(
+                            success_msg = await safe_send(
                                 chat_id,
                                 compile_extraction_success_status_text(job.id, f.name),
                                 link_preview_options=LinkPreviewOptions(is_disabled=True)
@@ -585,10 +600,11 @@ async def process_job(job: Job) -> None:
                         else:
                             log.error("Failed to extract archive %s", f.name)
                             try:
-                                await app.delete_messages(chat_id, status_msg.id)
+                                if status_msg:
+                                    await app.delete_messages(chat_id, status_msg.id)
                             except Exception:
                                 pass
-                            fail_msg = await app.send_message(
+                            fail_msg = await safe_send(
                                 chat_id,
                                 compile_extraction_failed_status_text(job.id, f.name),
                                 link_preview_options=LinkPreviewOptions(is_disabled=True)
@@ -610,10 +626,11 @@ async def process_job(job: Job) -> None:
                     except ArchivePasswordRequired:
                         log.warning("Archive %s requires a password to extract", f.name)
                         try:
-                            await app.delete_messages(chat_id, status_msg.id)
+                            if status_msg:
+                                await app.delete_messages(chat_id, status_msg.id)
                         except Exception:
                             pass
-                        await app.send_message(
+                        await safe_send(
                             chat_id,
                             f"**Password Required**: `{f.name}` is password-protected or password was incorrect.\n\n"
                             f"Please reply to the original archive file with:\n"
