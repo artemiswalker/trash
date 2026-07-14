@@ -42,7 +42,7 @@ def get_free_port() -> int:
 
 def sync_rpc_call(port: int, method: str, params: list) -> dict:
     """Synchronous JSON-RPC client call using urllib, bypassing system proxies."""
-    url = f"http://127.0.0.1:{port}/jsonrpc"
+    url = f"http://localhost:{port}/jsonrpc"
     payload = {
         "jsonrpc": "2.0",
         "id": "tgdl",
@@ -55,11 +55,11 @@ def sync_rpc_call(port: int, method: str, params: list) -> dict:
         data=data,
         headers={"Content-Type": "application/json"}
     )
+    # Bypass system proxies for localhost calls
     proxy_handler = urllib.request.ProxyHandler({})
     opener = urllib.request.build_opener(proxy_handler)
     with opener.open(req, timeout=5) as response:
         return json.loads(response.read().decode("utf-8"))
-
 
 
 async def async_rpc_call(port: int, method: str, params: list) -> dict:
@@ -88,7 +88,7 @@ async def download_torrent_async(
     cmd = [
         "aria2c",
         "--enable-rpc",
-        "--rpc-listen-all=false",
+        "--rpc-listen-all=true",
         f"--rpc-listen-port={port}",
         "--seed-time=0",
         "--seed-ratio=0.0",
@@ -102,6 +102,7 @@ async def download_torrent_async(
         "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         tracker_arg
     ]
+
 
     log.info("Launching aria2c RPC daemon on port %s", port)
     try:
@@ -167,6 +168,12 @@ async def download_torrent_async(
     error_tail = ""
     try:
         while True:
+            # Check if subprocess has exited (non-blocking poll)
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=0.0)
+            except asyncio.TimeoutError:
+                pass
+
             if proc.returncode is not None:
                 log.error("aria2c daemon stopped unexpectedly with code %s", proc.returncode)
                 break
@@ -175,9 +182,10 @@ async def download_torrent_async(
                 response = await async_rpc_call(port, "aria2.tellStatus", [gid])
                 result = response.get("result", {})
             except Exception as e:
-                log.warning("Failed to query status from aria2c daemon: %s", e)
+                log.error("Failed to query status from aria2c daemon: %s", e)
                 await asyncio.sleep(2.0)
                 continue
+
 
             followed_by = result.get("followedBy")
             if followed_by and len(followed_by) > 0:
