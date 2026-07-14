@@ -283,6 +283,7 @@ class QueueManager:
                     pass
 
         async def perform_uploads() -> None:
+            nonlocal job
             if not dest_dir.exists():
                 return
 
