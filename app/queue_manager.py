@@ -60,9 +60,10 @@ class JobState:
         self.uploaded_filenames = set()
         self.uploading_files = set()
         self.active_process = None
-        self.msg_id = None
+        self.msg_id = job.status_message_id
         self.last_edited_text = ""
         self.session_uploaded_count = 0
+        self.deleted_bytes = 0
 
 
 class QueueManager:
@@ -207,6 +208,40 @@ class QueueManager:
             def reg(proc):
                 job_state.active_process = proc
 
+            monitor_task = None
+            if not is_torrent and not is_unzip:
+                async def monitor_download_speed():
+                    last_download_size = 0
+                    last_download_time = time.time()
+                    while not job_state.downloader_done.is_set():
+                        await asyncio.sleep(1.0)
+                        if not dest_dir.exists():
+                            continue
+                        try:
+                            on_disk = sum(p.stat().st_size for p in dest_dir.rglob("*") if p.is_file())
+                            current_size = on_disk + job_state.deleted_bytes
+                        except Exception:
+                            continue
+
+                        now = time.time()
+                        dt = now - last_download_time
+                        if dt >= 1.0:
+                            speed = (current_size - last_download_size) / dt
+                            job_state.download_speed = 0.7 * speed + 0.3 * job_state.download_speed if last_download_size > 0 else speed
+                            last_download_size = current_size
+                            last_download_time = now
+                            job_state.total_downloaded_bytes = current_size
+                            job_state.trigger_event.set()
+
+                        try:
+                            part_files = sorted(p.name for p in dest_dir.rglob("*.part") if p.is_file())
+                            if part_files:
+                                job_state.current_download_file = part_files[0]
+                        except Exception:
+                            pass
+
+                monitor_task = asyncio.create_task(monitor_download_speed())
+
             if is_unzip:
                 from .downloader import DownloadResult
                 archive_files = []
@@ -252,6 +287,9 @@ class QueueManager:
         finally:
             job_state.downloader_done.set()
             job_state.trigger_event.set()
+            if monitor_task:
+                monitor_task.cancel()
+                await asyncio.gather(monitor_task, return_exceptions=True)
 
     async def _process_upload(self, job_state: JobState) -> None:
         job = job_state.job
@@ -272,16 +310,10 @@ class QueueManager:
                     if not db_job or db_job.status == JobStatus.CANCELLED:
                         break
                         
-                    if job_state.downloader_done.is_set():
-                        status_str = f"Uploading: {job_state.sent} uploaded"
-                    else:
-                        status_str = f"Downloading & Uploading..."
-                        
-                    if job_state.current_upload_file:
-                        status_str += f"\n- **Uploading**: `{job_state.current_upload_file}` ({job_state.current_upload_pct:.1f}%)"
-                        
                     if job_state.msg_id:
-                        await safe_edit(self.client, chat_id, job_state.msg_id, f"**Job #{job.id} Status**\n{status_str}")
+                        from .status import compile_job_status_text
+                        status_text = compile_job_status_text(db_job, job_state)
+                        await safe_edit(self.client, chat_id, job_state.msg_id, status_text)
                 except Exception:
                     pass
 

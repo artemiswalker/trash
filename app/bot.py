@@ -198,69 +198,8 @@ async def status_cmd(_, message: Message) -> None:
             job = await store.get_job(job_state.job_id)
             if not job:
                 continue
-            parsed_args = []
-            if job.args:
-                try:
-                    parsed_args = json.loads(job.args)
-                except Exception:
-                    pass
-            args_str = " ".join(parsed_args) if parsed_args else "None"
-            split_str = "Yes" if job.split_large_files else "No"
-
-            job_text = (
-                f"**Active Job #{job.id}**\n"
-                f"- **Status**: `{job.status}`\n"
-                f"- **URL**: {format_url_display(job.url)}\n"
-                f"- **Args**: `{args_str}`\n"
-                f"- **Split > 2GB**: {split_str}\n"
-            )
-
-            if job.status == JobStatus.DOWNLOADING or not job_state.downloader_done.is_set():
-                dl_speed_str = format_size(job_state.download_speed)
-                dl_bytes_str = format_size(job_state.total_downloaded_bytes)
-                
-                is_torrent = (
-                    job.url.startswith("magnet:") or
-                    job.url.startswith("torrent:") or
-                    job.url.endswith(".torrent") or
-                    "magnet:?xt=" in job.url
-                )
-                
-                job_text += "**Downloader Metrics**\n"
-                if is_torrent:
-                    bar = make_progress_bar(job_state.download_pct)
-                    job_text += (
-                        f"  - **Progress**: {job_state.download_pct:.1f}%\n"
-                        f"    `[{bar}]`\n"
-                        f"  - **Downloaded**: {dl_bytes_str}\n"
-                        f"  - **Speed**: {dl_speed_str}/s\n"
-                    )
-                else:
-                    if job_state.current_download_file:
-                        job_text += f"  - **Current File**: `{job_state.current_download_file}`\n"
-                    job_text += (
-                        f"  - **Files Downloaded**: {job_state.download_count}\n"
-                        f"  - **Downloaded**: {dl_bytes_str}\n"
-                        f"  - **Speed**: {dl_speed_str}/s\n"
-                    )
-            
-            if job.status == JobStatus.UPLOADING or job_state.sent > 0 or job_state.current_upload_file:
-                ul_speed_str = format_size(job_state.upload_speed)
-                bar = make_progress_bar(job_state.current_upload_pct)
-                
-                job_text += (
-                    f"**Uploader Metrics**\n"
-                    f"  - **Files Sent**: {job_state.sent} / {job.total_files if job.total_files > 0 else 'Calculating'}\n"
-                    f"  - **Files Skipped**: {len(job_state.skipped)}\n"
-                )
-                if job_state.current_upload_file:
-                    job_text += (
-                        f"  - **Current File**: `{job_state.current_upload_file}`\n"
-                        f"  - **Progress**: {job_state.current_upload_pct:.1f}%\n"
-                        f"    `[{bar}]`\n"
-                        f"  - **Speed**: {ul_speed_str}/s\n"
-                    )
-            
+            from .status import compile_job_status_text
+            job_text = compile_job_status_text(job, job_state)
             response += job_text + "\n"
     else:
         response = "**Bot Status: Idle**\nNo active download/upload task is currently running.\n"
