@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     tg_api_hash: str = Field(..., min_length=1)
     tg_bot_token: str = Field(..., min_length=1)
 
+
     # --- Storage locations ---
     data_dir: Path = Field(default=Path("./data"))
 

@@ -1,14 +1,23 @@
-FROM python:3.12-slim
+FROM ubuntu:latest
 
-# ffmpeg is optional but gallery-dl / video handling benefits from it being present
+# Avoid prompt dialogs during package installation
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install Python, media tools, torrent client, and archive extraction libraries
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 \
+    python3-pip \
     ffmpeg \
+    aria2 \
+    unzip \
+    unrar \
+    p7zip-full \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip3 install --no-cache-dir --break-system-packages -r requirements.txt
 
 COPY app ./app
 
@@ -17,4 +26,4 @@ USER botuser
 
 VOLUME ["/app/data", "/app/logs"]
 
-ENTRYPOINT ["python", "-m", "app.bot"]
+ENTRYPOINT ["python3", "-m", "app.bot"]

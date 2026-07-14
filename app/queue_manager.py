@@ -865,6 +865,6 @@ async def log_upload(job_id: int, filename: str) -> None:
 
 
 def is_job_owner(chat_id: int, job: Job) -> bool:
-    return job.chat_id == chat_id or chat_id in settings.tg_admin_ids
+    return job.chat_id == chat_id
 
 queue_manager = QueueManager()
