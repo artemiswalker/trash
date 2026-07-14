@@ -45,6 +45,7 @@ from .archive import (
     ARCHIVE_EXT,
     extract_archive_async,
     handle_archive_choice,
+    ArchivePasswordRequired,
 )
 from .conversion import (
     _conversion_ids,
@@ -527,7 +528,17 @@ async def process_job(job: Job) -> None:
                         pass
 
                     try:
-                        extracted = await extract_archive_async(f, dest_dir)
+                        password = None
+                        if job.args:
+                            import json
+                            try:
+                                parsed = json.loads(job.args)
+                                if isinstance(parsed, dict):
+                                    password = parsed.get("password")
+                            except Exception:
+                                pass
+
+                        extracted = await extract_archive_async(f, dest_dir, password=password)
                         if extracted:
                             log.info("Successfully extracted archive %s", f.name)
                             try:
@@ -594,6 +605,26 @@ async def process_job(job: Job) -> None:
                                 except Exception:
                                     pass
                             asyncio.create_task(delete_fail_msg(fail_msg))
+                    except ArchivePasswordRequired:
+                        log.warning("Archive %s requires a password to extract", f.name)
+                        try:
+                            await app.delete_messages(chat_id, status_msg.id)
+                        except Exception:
+                            pass
+                        await app.send_message(
+                            chat_id,
+                            f"**Password Required**: `{f.name}` is password-protected or password was incorrect.\n\n"
+                            f"Please reply to the original archive file with:\n"
+                            f"`/unzip <password>`\n"
+                            f"to extract and upload its contents.",
+                            link_preview_options=LinkPreviewOptions(is_disabled=True)
+                        )
+                        if archive_prompt_msg_id:
+                            try:
+                                await app.delete_messages(chat_id, archive_prompt_msg_id)
+                            except Exception:
+                                pass
+                        raise
                     except Exception:
                         try:
                             await app.delete_messages(chat_id, status_msg.id)
@@ -874,6 +905,9 @@ async def process_job(job: Job) -> None:
             await store.update_progress(job.id, status=JobStatus.CANCELLED, url="")
             await report("Job cancelled.")
             shutil.rmtree(dest_dir, ignore_errors=True)
+        return
+    except ArchivePasswordRequired:
+        await store.update_progress(job.id, status=JobStatus.FAILED, error="Password required or incorrect", url="")
         return
     except GalleryDLNotFound as e:
         await store.update_progress(job.id, status=JobStatus.FAILED, error=str(e), url="")
@@ -1239,7 +1273,14 @@ async def unzip_cmd(_, message: Message) -> None:
         await message.reply_text(f"Unsupported archive format. Supported formats: {supported_list}")
         return
 
-    job = await store.create_job(message.chat.id, f"unzip:{filename}", split_large_files=1, args=None)
+    # Parse optional password
+    cmd_parts = message.text.split(maxsplit=1)
+    password = cmd_parts[1].strip() if len(cmd_parts) > 1 else None
+    
+    import json
+    args_json = json.dumps({"password": password}) if password else None
+
+    job = await store.create_job(message.chat.id, f"unzip:{filename}", split_large_files=1, args=args_json)
     await store.update_progress(job.id, status="waiting")
 
     dest_dir = (settings.downloads_dir / job.download_dir).resolve()

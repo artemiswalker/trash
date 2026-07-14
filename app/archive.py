@@ -4,6 +4,7 @@ import asyncio
 import logging
 import shutil
 from pathlib import Path
+from typing import Optional
 
 from pyrogram.types import CallbackQuery, LinkPreviewOptions
 from .status import compile_archive_choice_status_text
@@ -19,39 +20,65 @@ _extracted_file_names: dict[int, set[str]] = {}
 ARCHIVE_EXT = {".zip", ".7z", ".rar", ".tar", ".gz", ".bz2", ".xz", ".tgz"}
 
 
-async def extract_archive_async(archive_path: Path, extract_dir: Path) -> bool:
+class ArchivePasswordRequired(Exception):
+    pass
+
+
+async def extract_archive_async(archive_path: Path, extract_dir: Path, password: Optional[str] = None) -> bool:
     ext = archive_path.suffix.lower()
 
     # 1. Try native commands first for speed and robustness
     if ext == ".zip" and shutil.which("unzip"):
         try:
             log.info("Extracting %s using unzip command line tool", archive_path.name)
+            args = ["unzip", "-o"]
+            if password:
+                args.extend(["-P", password])
+            args.extend([str(archive_path), "-d", str(extract_dir)])
+            
             proc = await asyncio.create_subprocess_exec(
-                "unzip", "-o", str(archive_path), "-d", str(extract_dir),
+                *args,
                 stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
             )
-            await proc.wait()
+            stdout, stderr = await proc.communicate()
+            output = (stdout.decode(errors="ignore") + stderr.decode(errors="ignore")).lower()
             if proc.returncode == 0:
                 return True
             log.warning("unzip command returned non-zero code: %s", proc.returncode)
+            if "password" in output or "incorrect password" in output or "encrypted" in output:
+                raise ArchivePasswordRequired()
+        except ArchivePasswordRequired:
+            raise
         except Exception:
             log.exception("unzip command failed")
 
     if ext == ".rar" and shutil.which("unrar"):
         try:
             log.info("Extracting %s using unrar command line tool", archive_path.name)
+            args = ["unrar", "x", "-y"]
+            if password:
+                args.append(f"-p{password}")
+            else:
+                args.append("-p-")
+            args.extend([str(archive_path), str(extract_dir)])
+            
             proc = await asyncio.create_subprocess_exec(
-                "unrar", "x", "-y", str(archive_path), str(extract_dir),
+                *args,
                 stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
             )
-            await proc.wait()
+            stdout, stderr = await proc.communicate()
+            output = (stdout.decode(errors="ignore") + stderr.decode(errors="ignore")).lower()
             if proc.returncode == 0:
                 return True
             log.warning("unrar command returned non-zero code: %s", proc.returncode)
+            if "password" in output or "encrypted" in output:
+                raise ArchivePasswordRequired()
+        except ArchivePasswordRequired:
+            raise
         except Exception:
             log.exception("unrar command failed")
 
@@ -75,16 +102,26 @@ async def extract_archive_async(archive_path: Path, extract_dir: Path) -> bool:
     if shutil.which("7z"):
         try:
             log.info("Extracting %s using 7z command line tool", archive_path.name)
+            args = ["7z", "x", "-y", f"-o{extract_dir}"]
+            if password:
+                args.append(f"-p{password}")
+            args.append(str(archive_path))
+            
             proc = await asyncio.create_subprocess_exec(
-                "7z", "x", "-y", f"-o{extract_dir}", str(archive_path),
+                *args,
                 stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
             )
-            await proc.wait()
+            stdout, stderr = await proc.communicate()
+            output = (stdout.decode(errors="ignore") + stderr.decode(errors="ignore")).lower()
             if proc.returncode == 0:
                 return True
             log.warning("7z command returned non-zero code: %s", proc.returncode)
+            if "password" in output or "encrypted" in output:
+                raise ArchivePasswordRequired()
+        except ArchivePasswordRequired:
+            raise
         except Exception:
             log.exception("7z command failed")
 
