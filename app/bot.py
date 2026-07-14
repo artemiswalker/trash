@@ -593,6 +593,8 @@ async def process_job(job: Job) -> None:
                                 compile_extraction_failed_status_text(job.id, f.name),
                                 link_preview_options=LinkPreviewOptions(is_disabled=True)
                             )
+                            if job.url.startswith("unzip:"):
+                                raise Exception(f"Failed to extract archive {f.name}")
                             if archive_prompt_msg_id:
                                 try:
                                     await app.delete_messages(chat_id, archive_prompt_msg_id)
@@ -758,6 +760,14 @@ async def process_job(job: Job) -> None:
                 for part in split_parts:
                     if part not in pending:
                         pending.append(part)
+                continue
+
+            if job.url.startswith("unzip:") and f.suffix.lower() in ARCHIVE_EXT:
+                log.info("Safety check: skipping and removing archive file %s for unzip job", f.name)
+                try:
+                    f.unlink(missing_ok=True)
+                except Exception:
+                    pass
                 continue
 
             uploading_files.add(f_rel)
