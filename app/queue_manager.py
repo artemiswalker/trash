@@ -302,6 +302,16 @@ class QueueManager:
             ]
 
             for f in pending:
+                if not job_state.downloader_done.is_set():
+                    try:
+                        sz1 = f.stat().st_size
+                        await asyncio.sleep(1.5)
+                        sz2 = f.stat().st_size
+                        if sz1 != sz2 or sz1 == 0:
+                            continue
+                    except Exception:
+                        continue
+
                 db_job = await self.store.get_job(job.id)
                 if db_job and db_job.status == JobStatus.CANCELLED:
                     return
@@ -593,6 +603,24 @@ class QueueManager:
                     )
 
         async def run_uploader() -> None:
+            while not job_state.downloader_done.is_set():
+                has_completed_file = False
+                if dest_dir.exists():
+                    try:
+                        files = [p for p in dest_dir.rglob("*") if p.is_file() and not p.name.endswith(".part")]
+                        for f in files:
+                            sz1 = f.stat().st_size
+                            await asyncio.sleep(0.5)
+                            sz2 = f.stat().st_size
+                            if sz1 == sz2 and sz1 > 0:
+                                has_completed_file = True
+                                break
+                    except Exception:
+                        pass
+                if has_completed_file:
+                    break
+                await asyncio.sleep(2.0)
+
             while True:
                 await perform_uploads()
 
