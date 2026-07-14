@@ -1185,31 +1185,78 @@ async def status_cmd(_, message: Message) -> None:
 @app.on_message(filters.command("cancel"))
 async def cancel_cmd(_, message: Message) -> None:
     chat_id = message.chat.id
-    active_cancelled = False
+    
+    cmd_parts = message.text.split()
+    if len(cmd_parts) > 1:
+        try:
+            job_id = int(cmd_parts[1])
+        except ValueError:
+            await message.reply_text("Invalid job ID format. Please use `/cancel <job_id>` or just `/cancel`.")
+            return
 
-    if status._current_job_id is not None:
-        job = await store.get_job(status._current_job_id)
-        if job and is_job_owner(chat_id, job):
-            await store.update_progress(job.id, status=JobStatus.CANCELLED)
-            await message.reply_text(
-                f"Marked active job #{job.id} for cancellation — it'll stop after the current file finishes."
-            )
-            active_cancelled = True
+        job = await store.get_job(job_id)
+        if not job or not is_job_owner(chat_id, job):
+            await message.reply_text(f"Job #{job_id} not found or not owned by you.")
+            return
 
+        if job.status in (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED):
+            await message.reply_text(f"Job #{job_id} is already in `{job.status}` state.")
+            return
+
+        await store.update_progress(job.id, status=JobStatus.CANCELLED)
+        
+        if status._current_job_id == job.id and status._active_process is not None:
+            try:
+                status._active_process.kill()
+                await message.reply_text(f"Instantly aborted and cancelled active job #{job.id}.")
+            except Exception as e:
+                log.warning("Failed to kill active process: %s", e)
+                await message.reply_text(f"Marked active job #{job.id} as cancelled.")
+        else:
+            await message.reply_text(f"Job #{job.id} has been cancelled successfully.")
+        return
     cur = await store.db.execute(
-        "SELECT id FROM jobs WHERE chat_id = ? AND status IN ('queued', 'waiting')",
+        "SELECT id, url, status FROM jobs WHERE chat_id = ? AND status IN ('queued', 'waiting', 'downloading', 'uploading')",
         (chat_id,)
     )
     rows = await cur.fetchall()
-    cancelled_ids = [r[0] for r in rows]
-    if cancelled_ids:
-        for cid in cancelled_ids:
-            await store.update_progress(cid, status=JobStatus.CANCELLED)
-        await message.reply_text(
-            f"Cancelled {len(cancelled_ids)} queued/waiting job(s) for this chat."
-        )
-    elif not active_cancelled:
+    if not rows:
         await message.reply_text("No active or queued jobs found for this chat.")
+        return
+
+    if len(rows) == 1:
+        job_id = rows[0]["id"]
+        job_status = rows[0]["status"]
+        await store.update_progress(job_id, status=JobStatus.CANCELLED)
+        if status._current_job_id == job_id and status._active_process is not None:
+            try:
+                status._active_process.kill()
+                await message.reply_text(f"Instantly aborted and cancelled active job #{job_id}.")
+            except Exception as e:
+                log.warning("Failed to kill active process: %s", e)
+                await message.reply_text(f"Marked active job #{job_id} as cancelled.")
+        else:
+            await message.reply_text(f"Job #{job_id} ({job_status}) has been cancelled.")
+        return
+
+    from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    buttons = []
+    for r in rows:
+        jid = r["id"]
+        url = r["url"]
+        jstatus = r["status"]
+        label = url.split(":", 1)[1] if ":" in url else url
+        label = label.split("/")[-1] or label
+        if len(label) > 25:
+            label = label[:22] + "…"
+            
+        btn_text = f"#{jid} - {label} ({jstatus})"
+        buttons.append([InlineKeyboardButton(btn_text, callback_data=f"cancel_job:{jid}")])
+
+    await message.reply_text(
+        "**Select a job to cancel:**",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
 
 
 @app.on_message(filters.command("gdl"))
@@ -1678,6 +1725,47 @@ async def handle_archive_choice_cb(_, callback_query: CallbackQuery) -> None:
 @app.on_callback_query(filters.regex(r"^convert_(mp4|orig):(\d+):(\d+)$"))
 async def handle_conversion_choice_cb(client: Client, callback_query: CallbackQuery) -> None:
     await handle_conversion_choice(client, callback_query, store, is_job_owner)
+
+
+@app.on_callback_query(filters.regex(r"^cancel_job:(\d+)$"))
+async def handle_cancel_job_cb(_, callback_query: CallbackQuery) -> None:
+    data = callback_query.data
+    job_id = int(data.split(":")[1])
+    chat_id = callback_query.message.chat.id
+
+    job = await store.get_job(job_id)
+    if not job:
+        await callback_query.answer("Job not found.", show_alert=True)
+        return
+
+    if not is_job_owner(chat_id, job):
+        await callback_query.answer("Unauthorized: You do not own this job.", show_alert=True)
+        return
+
+    if job.status in (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED):
+        await callback_query.answer(f"Job is already {job.status}.")
+        try:
+            await callback_query.message.delete()
+        except Exception:
+            pass
+        return
+
+    await store.update_progress(job_id, status=JobStatus.CANCELLED)
+    
+    if status._current_job_id == job_id and status._active_process is not None:
+        try:
+            status._active_process.kill()
+        except Exception:
+            pass
+
+    await callback_query.answer(f"Job #{job_id} cancelled.")
+    try:
+        await callback_query.message.edit_text(
+            f"**Job #{job_id} cancelled successfully** by owner.",
+            reply_markup=None
+        )
+    except Exception:
+        pass
 
 
 async def requeue_incomplete_jobs() -> None:

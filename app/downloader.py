@@ -57,6 +57,9 @@ async def _stream_run(cmd: list[str]) -> tuple[int, str, Callable[[], int]]:
         stderr=asyncio.subprocess.PIPE,
     )
 
+    from . import status
+    status._active_process = proc
+
     count = 0
     stderr_chunks: list[str] = []
 
@@ -76,9 +79,19 @@ async def _stream_run(cmd: list[str]) -> tuple[int, str, Callable[[], int]]:
             if len(stderr_chunks) > 200:
                 stderr_chunks.pop(0)
 
-    await asyncio.gather(read_stdout(), read_stderr())
-    returncode = await proc.wait()
-    return returncode, "".join(stderr_chunks), (lambda: count)
+    try:
+        await asyncio.gather(read_stdout(), read_stderr())
+        returncode = await proc.wait()
+        return returncode, "".join(stderr_chunks), (lambda: count)
+    except asyncio.CancelledError:
+        try:
+            proc.terminate()
+            await proc.wait()
+        except Exception:
+            pass
+        raise
+    finally:
+        status._active_process = None
 
 
 async def run_with_progress(
@@ -125,6 +138,9 @@ async def run_with_progress(
             proc = await asyncio.create_subprocess_exec(
                 *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
             )
+            from . import status
+            status._active_process = proc
+
             count = 0
             stderr_buf: list[str] = []
 
@@ -151,6 +167,8 @@ async def run_with_progress(
                 except Exception:
                     pass
                 raise
+            finally:
+                status._active_process = None
 
             last_stderr = last_stderr or "".join(stderr_buf)[-3000:]
 

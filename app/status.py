@@ -11,8 +11,8 @@ from pyrogram.types import LinkPreviewOptions
 
 log = logging.getLogger(__name__)
 
-# Global metrics and trackers
 _current_job_id: Optional[int] = None
+_active_process = None
 _active_job_metrics = {
     "download_speed": 0.0,
     "upload_speed": 0.0,

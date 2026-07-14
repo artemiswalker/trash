@@ -102,6 +102,9 @@ async def download_torrent_async(
         log.exception("Failed to start aria2c for torrent %s", target)
         return DownloadResult(ok=False, error_tail=f"Failed to start aria2c: {e}")
 
+    from . import status
+    status._active_process = proc
+
     stderr_chunks: list[str] = []
 
     async def read_stdout():
@@ -135,9 +138,19 @@ async def download_torrent_async(
             if len(stderr_chunks) > 100:
                 stderr_chunks.pop(0)
 
-    await asyncio.gather(read_stdout(), read_stderr())
+    try:
+        await asyncio.gather(read_stdout(), read_stderr())
+        returncode = await proc.wait()
+    except asyncio.CancelledError:
+        try:
+            proc.terminate()
+            await proc.wait()
+        except Exception:
+            pass
+        raise
+    finally:
+        status._active_process = None
 
-    returncode = await proc.wait()
     ok = returncode == 0
     error_tail = "".join(stderr_chunks)
 
