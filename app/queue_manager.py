@@ -343,6 +343,12 @@ class QueueManager:
         job = job_state.job
         chat_id = job.chat_id
         dest_dir = job_state.dest_dir
+        is_torrent = (
+            job.url.startswith("magnet:") or
+            job.url.startswith("torrent:") or
+            job.url.endswith(".torrent") or
+            "magnet:?xt=" in job.url
+        )
         
         async def report(text: str) -> None:
             await safe_send(self.client, chat_id, text, link_preview_options=LinkPreviewOptions(is_disabled=True))
@@ -639,6 +645,116 @@ class QueueManager:
                         pass
                     continue
 
+                is_incompatible = f.suffix.lower() in CONVERSION_EXT
+                if is_incompatible and not is_torrent:
+                    if job.id not in _conversion_ids:
+                         _conversion_ids[job.id] = {}
+                    conv_id = None
+                    for cid, fname in _conversion_ids[job.id].items():
+                         if fname == f.name:
+                             conv_id = cid
+                             break
+                    if conv_id is None:
+                         conv_id = str(len(_conversion_ids[job.id]) + 1)
+                         _conversion_ids[job.id][conv_id] = f.name
+
+                    choice = _conversion_choices.get(job.id, {}).get(conv_id)
+                    if choice != "orig" and f.name not in _converted_files.get(job.id, set()):
+                         conversion_prompt_msg_id = None
+                         if choice is None:
+                             from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+                             from .status import compile_conversion_prompt_text
+                             keyboard = InlineKeyboardMarkup([
+                                 [
+                                     InlineKeyboardButton("Convert to MP4", callback_data=f"convert_mp4:{job.id}:{conv_id}"),
+                                     InlineKeyboardButton("Original File", callback_data=f"convert_orig:{job.id}:{conv_id}")
+                                 ]
+                             ])
+                             prompt_text = compile_conversion_prompt_text(job.id, f.name)
+                             prompt_msg = await safe_send(self.client, chat_id, prompt_text, reply_markup=keyboard)
+                             if prompt_msg:
+                                 conversion_prompt_msg_id = prompt_msg.id
+
+                             if job.id not in _conversion_events:
+                                 _conversion_events[job.id] = {}
+                             _conversion_events[job.id][conv_id] = asyncio.Event()
+
+                             await _conversion_events[job.id][conv_id].wait()
+                             choice = _conversion_choices.get(job.id, {}).get(conv_id)
+
+                         if choice == "mp4":
+                             if job.id not in _converted_files:
+                                 _converted_files[job.id] = set()
+                             _converted_files[job.id].add(f.name)
+
+                             log.info("Converting video %s to MP4 for job %s", f.name, job.id)
+                             output_name = f.stem + "_converted.mp4"
+                             output_path = f.parent / output_name
+
+                             from .status import compile_conversion_running_status_text
+                             conv_msg = await safe_send(
+                                 self.client,
+                                 chat_id,
+                                 compile_conversion_running_status_text(job.id, f.name)
+                             )
+
+                             job_state.is_converting = True
+                             job_state.conversion_file = f.name
+                             job_state.trigger_event.set()
+
+                             try:
+                                 success = await convert_media_async(f, output_path)
+                             finally:
+                                 job_state.is_converting = False
+                                 job_state.conversion_file = None
+                                 job_state.trigger_event.set()
+
+                             if conv_msg:
+                                 try:
+                                     await self.client.delete_messages(chat_id, conv_msg.id)
+                                 except Exception:
+                                     pass
+
+                             if success:
+                                 log.info("Successfully converted video %s to %s", f.name, output_name)
+                                 try:
+                                     f.unlink(missing_ok=True)
+                                 except Exception:
+                                     pass
+
+                                 if conversion_prompt_msg_id:
+                                     try:
+                                         await self.client.delete_messages(chat_id, conversion_prompt_msg_id)
+                                     except Exception:
+                                         pass
+                                 break
+                             else:
+                                 log.error("Failed to convert video %s", f.name)
+                                 from .status import compile_conversion_failed_status_text
+                                 fail_msg = await safe_send(
+                                     self.client,
+                                     chat_id,
+                                     compile_conversion_failed_status_text(job.id, f.name)
+                                 )
+                                 async def delete_fail_msg(m):
+                                     await asyncio.sleep(5)
+                                     try:
+                                         await self.client.delete_messages(chat_id, m.id)
+                                     except Exception:
+                                         pass
+                                 if fail_msg:
+                                     asyncio.create_task(delete_fail_msg(fail_msg))
+
+                                 if job.id not in _conversion_choices:
+                                     _conversion_choices[job.id] = {}
+                                 _conversion_choices[job.id][conv_id] = "orig"
+
+                         if choice == "orig" and conversion_prompt_msg_id:
+                             try:
+                                 await self.client.delete_messages(chat_id, conversion_prompt_msg_id)
+                             except Exception:
+                                 pass
+
                 job_state.uploading_files.add(f_rel)
                 try:
                     await self.store.update_progress(job.id, status=JobStatus.UPLOADING)
@@ -699,13 +815,6 @@ class QueueManager:
                     await asyncio.sleep(delay)
 
         async def run_uploader() -> None:
-            is_torrent = (
-                job.url.startswith("magnet:") or
-                job.url.startswith("torrent:") or
-                job.url.endswith(".torrent") or
-                "magnet:?xt=" in job.url
-            )
-
             if is_torrent:
                 while not job_state.downloader_done.is_set():
                     await asyncio.sleep(2.0)
@@ -731,6 +840,10 @@ class QueueManager:
                                 success = await convert_media_async(f, output_path)
                                 if success:
                                     log.info("Successfully converted incompatible torrent file %s", f.name)
+                                    try:
+                                        f.unlink(missing_ok=True)
+                                    except Exception:
+                                        pass
                                 else:
                                     log.error("Failed to convert incompatible torrent file %s", f.name)
                 except Exception as ce:
