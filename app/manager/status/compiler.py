@@ -46,7 +46,6 @@ def compile_queued_status_text(job_id: int, url: str, args_display: str) -> str:
     )
     if is_torrent:
         if url.startswith("torrent:"):
-            from pathlib import Path
             torrent_path = url[len("torrent:"):]
             name = Path(torrent_path).name
             return (
@@ -167,7 +166,6 @@ def compile_job_status_text(job, job_state) -> str:
         if torrent_name:
             job_text += f"- **Name**: `{torrent_name}`\n"
         elif job.url.startswith("torrent:"):
-            from pathlib import Path
             torrent_path = job.url[len("torrent:"):]
             name = Path(torrent_path).name
             job_text += f"- **File**: `{name}`\n"

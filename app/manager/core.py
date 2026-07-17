@@ -8,8 +8,9 @@ import shutil
 from pathlib import Path
 from typing import Optional
 
+import json
 from pyrogram import Client
-from pyrogram.types import LinkPreviewOptions, Message, ForceReply
+from pyrogram.types import LinkPreviewOptions, Message, ForceReply, InlineKeyboardMarkup, InlineKeyboardButton
 
 from ..config import settings
 from ..db import Job, JobStatus, JobStore
@@ -275,7 +276,6 @@ class QueueManager:
             else:
                 extra_args = None
                 if job.args:
-                    import json
                     try:
                         extra_args = json.loads(job.args)
                     except Exception:
@@ -433,7 +433,6 @@ class QueueManager:
                         _archive_choices[job.id][archive_id] = "ext"
                     else:
                         if job.id not in _archive_choices or archive_id not in _archive_choices[job.id]:
-                            from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
                             prompt_text = compile_archive_prompt_text(job.id, f.name)
                             kb = InlineKeyboardMarkup([
                                 [
@@ -479,7 +478,6 @@ class QueueManager:
                         try:
                             password = None
                             if job.args:
-                                import json
                                 try:
                                     parsed = json.loads(job.args)
                                     if isinstance(parsed, dict):
@@ -585,7 +583,6 @@ class QueueManager:
                                 _password_prompt_messages[prompt_msg.id] = (job.id, archive_id, chat_id)
                                 
                                 try:
-                                    import time
                                     start_time = time.time()
                                     while not job_state.uploader_done.is_set() and not event.is_set():
                                         if time.time() - start_time >= 300:
@@ -598,7 +595,6 @@ class QueueManager:
                                         return
                                     new_password = data["password"]
                                     
-                                    import json
                                     job_args_dict = {}
                                     if job.args:
                                         try:
@@ -674,7 +670,6 @@ class QueueManager:
                     if choice != "orig" and f.name not in _converted_files.get(job.id, set()):
                          conversion_prompt_msg_id = None
                          if choice is None:
-                             from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
                              keyboard = InlineKeyboardMarkup([
                                  [
                                      InlineKeyboardButton("Convert to MP4", callback_data=f"convert_mp4:{job.id}:{conv_id}"),
@@ -788,7 +783,6 @@ class QueueManager:
                     if choice != "orig" and f.name not in _converted_files.get(job.id, set()):
                         conversion_prompt_msg_id = None
                         if choice is None:
-                            from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
                             keyboard = InlineKeyboardMarkup([
                                 [
                                     InlineKeyboardButton("Convert to MP3", callback_data=f"convert_mp3:{job.id}:{conv_id}"),
