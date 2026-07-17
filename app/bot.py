@@ -772,7 +772,7 @@ async def handle_archive_choice_cb(_, callback_query: CallbackQuery) -> None:
     await handle_archive_choice(callback_query, store, is_job_owner)
 
 
-@app.on_callback_query(filters.regex(r"^convert_(mp4|orig):(\d+):(.+)$"))
+@app.on_callback_query(filters.regex(r"^convert_(mp4|mp3|orig):(\d+):(.+)$"))
 async def handle_conversion_choice_cb(client: Client, callback_query: CallbackQuery) -> None:
     await handle_conversion_choice(client, callback_query, store, is_job_owner)
 

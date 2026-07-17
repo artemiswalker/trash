@@ -4,3 +4,6 @@ gallery-dl
 pydantic
 pydantic-settings
 aiosqlite
+av
+pillow
+pedalboard

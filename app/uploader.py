@@ -331,40 +331,16 @@ async def upload_file(
 
 
 async def split_video(video_path: Path, max_size_bytes: int) -> list[Path]:
-    size = video_path.stat().st_size
-    meta = await probe_video(video_path)
-    duration = meta.get("duration", 0)
-    if duration <= 0:
-        return await split_binary(video_path, max_size_bytes)
-
-    bitrate = size / duration
-    target_segment_size = int(max_size_bytes * 0.95)
-    segment_duration = target_segment_size / bitrate
-
-    out_pattern = video_path.parent / f"{video_path.stem}_part%03d{video_path.suffix}"
     try:
-        proc = await asyncio.create_subprocess_exec(
-            "ffmpeg",
-            "-i", str(video_path),
-            "-c", "copy",
-            "-map", "0",
-            "-f", "segment",
-            "-segment_time", f"{segment_duration:.3f}",
-            "-reset_timestamps", "1",
-            str(out_pattern),
-            "-y",
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        await asyncio.wait_for(proc.wait(), timeout=600.0)
-        if proc.returncode == 0:
-            parts = sorted(list(video_path.parent.glob(f"{video_path.stem}_part*{video_path.suffix}")))
-            if parts:
-                return parts
-    except Exception:
-        log.exception("Failed to split video using ffmpeg segmenter: %s", video_path)
+        from .conversion import split_video_async
+        parts = await split_video_async(video_path, max_size_bytes)
+        if parts:
+            return parts
+    except Exception as e:
+        log.exception("Failed to split video using PyAV segmenter: %s", video_path)
 
     return await split_binary(video_path, max_size_bytes)
+
 
 
 async def split_binary(file_path: Path, max_size_bytes: int) -> list[Path]:

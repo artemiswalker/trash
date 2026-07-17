@@ -148,6 +148,15 @@ def compile_conversion_prompt_text(job_id: int, filename: str) -> str:
     )
 
 
+def compile_audio_conversion_prompt_text(job_id: int, filename: str) -> str:
+    return (
+        f"**Job #{job_id} - High Quality Audio Format**\n"
+        f"- **File**: `{filename}`\n\n"
+        "The file is in a lossless or uncompressed audio format. "
+        "Do you want to convert it to MP3 (optimized & mastered using Pedalboard) first, or upload the original?"
+    )
+
+
 def compile_conversion_choice_status_text(job_id: int, filename: str, choice_str: str) -> str:
     return (
         f"**Job #{job_id} - Media Conversion**\n"
@@ -164,8 +173,16 @@ def compile_conversion_running_status_text(job_id: int, filename: str) -> str:
     return f"**Job #{job_id} - Media Conversion**\nConverting `{filename}` to standard MP4 container..."
 
 
+def compile_audio_conversion_running_status_text(job_id: int, filename: str) -> str:
+    return f"**Job #{job_id} - Audio Processing & Conversion**\nApplying Pedalboard mastering chain and converting `{filename}` to MP3..."
+
+
 def compile_conversion_failed_status_text(job_id: int, filename: str) -> str:
     return f"**Job #{job_id} - Conversion Failed**\nFailed to convert `{filename}`. Uploading original as document."
+
+
+def compile_audio_conversion_failed_status_text(job_id: int, filename: str) -> str:
+    return f"**Job #{job_id} - Audio Processing Failed**\nFailed to process `{filename}`. Uploading original file."
 
 
 def compile_extraction_failed_status_text(job_id: int, filename: str) -> str:

@@ -2,5 +2,8 @@
 app/__pycache__/
 app/__pycache__/*
 .env
-__pycache__/*
+app/conversion/__pycache__/*
+app/conversion/__pycache__
+app/conversion/*/__pycache__/*
+app/conversion/*/__pycache__
 *.zip

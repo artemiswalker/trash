@@ -13,10 +13,12 @@ from pyrogram.types import LinkPreviewOptions, ForceReply, Message
 
 from .config import settings
 from .db import Job, JobStatus, JobStore
-from .uploader import upload_file, UploadTooLarge
+from .uploader import upload_file, UploadTooLarge, handle_large_file
 from .conversion import (
     convert_media_async,
+    convert_audio_async,
     CONVERSION_EXT,
+    AUDIO_CONVERSION_EXT,
     _conversion_ids,
     _conversion_events,
     _conversion_choices,
@@ -755,6 +757,137 @@ class QueueManager:
                              except Exception:
                                  pass
 
+                # Audio format conversion & processing using Pedalboard
+                is_audio_incompatible = f.suffix.lower() in AUDIO_CONVERSION_EXT
+                if is_audio_incompatible and not is_torrent:
+                    if job.id not in _conversion_ids:
+                        _conversion_ids[job.id] = {}
+                    conv_id = None
+                    for cid, fname in _conversion_ids[job.id].items():
+                        if fname == f.name:
+                            conv_id = cid
+                            break
+                    if conv_id is None:
+                        conv_id = str(len(_conversion_ids[job.id]) + 1)
+                        _conversion_ids[job.id][conv_id] = f.name
+
+                    choice = _conversion_choices.get(job.id, {}).get(conv_id)
+                    if choice != "orig" and f.name not in _converted_files.get(job.id, set()):
+                        conversion_prompt_msg_id = None
+                        if choice is None:
+                            from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+                            from .status import compile_audio_conversion_prompt_text
+                            keyboard = InlineKeyboardMarkup([
+                                [
+                                    InlineKeyboardButton("Convert to MP3", callback_data=f"convert_mp3:{job.id}:{conv_id}"),
+                                    InlineKeyboardButton("Original File", callback_data=f"convert_orig:{job.id}:{conv_id}")
+                                ]
+                            ])
+                            prompt_text = compile_audio_conversion_prompt_text(job.id, f.name)
+                            prompt_msg = await safe_send(self.client, chat_id, prompt_text, reply_markup=keyboard)
+                            if prompt_msg:
+                                conversion_prompt_msg_id = prompt_msg.id
+
+                            if job.id not in _conversion_events:
+                                _conversion_events[job.id] = {}
+                            _conversion_events[job.id][conv_id] = asyncio.Event()
+
+                            await _conversion_events[job.id][conv_id].wait()
+                            choice = _conversion_choices.get(job.id, {}).get(conv_id)
+
+                        if choice == "mp3":
+                            if job.id not in _converted_files:
+                                _converted_files[job.id] = set()
+                            _converted_files[job.id].add(f.name)
+
+                            log.info("Converting/processing audio %s to MP3 for job %s", f.name, job.id)
+                            output_name = f.stem + "_converted.mp3"
+                            output_path = f.parent / output_name
+
+                            from .status import compile_audio_conversion_running_status_text
+                            conv_msg = await safe_send(
+                                self.client,
+                                chat_id,
+                                compile_audio_conversion_running_status_text(job.id, f.name)
+                            )
+
+                            job_state.is_converting = True
+                            job_state.conversion_file = f.name
+                            job_state.trigger_event.set()
+
+                            try:
+                                success = await convert_audio_async(f, output_path)
+                            finally:
+                                job_state.is_converting = False
+                                job_state.conversion_file = None
+                                job_state.trigger_event.set()
+
+                            if conv_msg:
+                                try:
+                                    await self.client.delete_messages(chat_id, conv_msg.id)
+                                except Exception:
+                                    pass
+
+                            if success:
+                                log.info("Successfully converted audio %s to %s", f.name, output_name)
+                                try:
+                                    f.unlink(missing_ok=True)
+                                except Exception:
+                                    pass
+
+                                if conversion_prompt_msg_id:
+                                    try:
+                                        await self.client.delete_messages(chat_id, conversion_prompt_msg_id)
+                                    except Exception:
+                                        pass
+                                break
+                            else:
+                                log.error("Failed to convert audio %s", f.name)
+                                from .status import compile_audio_conversion_failed_status_text
+                                fail_msg = await safe_send(
+                                    self.client,
+                                    chat_id,
+                                    compile_audio_conversion_failed_status_text(job.id, f.name)
+                                )
+                                async def delete_fail_msg(m):
+                                    await asyncio.sleep(5)
+                                    try:
+                                        await self.client.delete_messages(chat_id, m.id)
+                                    except Exception:
+                                        pass
+                                if fail_msg:
+                                    asyncio.create_task(delete_fail_msg(fail_msg))
+
+                                if job.id not in _conversion_choices:
+                                    _conversion_choices[job.id] = {}
+                                _conversion_choices[job.id][conv_id] = "orig"
+
+                        if choice == "orig" and conversion_prompt_msg_id:
+                            try:
+                                await self.client.delete_messages(chat_id, conversion_prompt_msg_id)
+                            except Exception:
+                                pass
+
+                # Handle large files (>1.95GB) splitting before upload
+                try:
+                    split_parts = await handle_large_file(f, bool(job.split_large_files))
+                except Exception as sle:
+                    log.exception("Error while handling large file split for %s: %s", f.name, sle)
+                    split_parts = [f]
+
+                if not split_parts:
+                    # File was skipped (deleted because it was too large and split was false or failed)
+                    await self.store.mark_uploaded(job.id, f_rel)
+                    break
+
+                if len(split_parts) == 1 and split_parts[0] == f:
+                    # File was not split, proceed normally
+                    pass
+                else:
+                    # File was split/deleted. Mark the original file as complete in the database and break to scan the parts
+                    await self.store.mark_uploaded(job.id, f_rel)
+                    break
+
                 job_state.uploading_files.add(f_rel)
                 try:
                     await self.store.update_progress(job.id, status=JobStatus.UPLOADING)
@@ -846,6 +979,25 @@ class QueueManager:
                                         pass
                                 else:
                                     log.error("Failed to convert incompatible torrent file %s", f.name)
+                            elif f.suffix.lower() in AUDIO_CONVERSION_EXT:
+                                job_state.is_converting = True
+                                job_state.conversion_file = f.name
+                                job_state.trigger_event.set()
+
+                                output_path = f.with_suffix(".mp3")
+                                if output_path.exists():
+                                    output_path = f.with_name(f"{f.stem}_converted.mp3")
+
+                                log.info("Converting incompatible audio torrent file %s to %s", f.name, output_path.name)
+                                success = await convert_audio_async(f, output_path)
+                                if success:
+                                    log.info("Successfully converted incompatible audio torrent file %s", f.name)
+                                    try:
+                                        f.unlink(missing_ok=True)
+                                    except Exception:
+                                        pass
+                                else:
+                                    log.error("Failed to convert incompatible audio torrent file %s", f.name)
                 except Exception as ce:
                     log.exception("Error during torrent media conversion: %s", ce)
                 finally:
