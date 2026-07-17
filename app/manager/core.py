@@ -413,6 +413,9 @@ class QueueManager:
                 if db_job and db_job.status == JobStatus.CANCELLED:
                     return
 
+                if job_state.uploader_done.is_set():
+                    return
+
                 f_rel = str(f.relative_to(dest_dir))
 
                 is_archive = f.suffix.lower() in ARCHIVE_EXT
@@ -446,7 +449,13 @@ class QueueManager:
                                 _archive_events[job.id] = {}
                             _archive_events[job.id][archive_id] = asyncio.Event()
 
-                            await _archive_events[job.id][archive_id].wait()
+                            while not job_state.uploader_done.is_set() and not _archive_events[job.id][archive_id].is_set():
+                                try:
+                                    await asyncio.wait_for(_archive_events[job.id][archive_id].wait(), timeout=2.0)
+                                except asyncio.TimeoutError:
+                                    pass
+                            if job_state.uploader_done.is_set():
+                                return
 
                     choice = _archive_choices[job.id][archive_id]
                     if choice == "ext" and f_rel not in _extracted_archives.get(job.id, set()):
@@ -576,7 +585,17 @@ class QueueManager:
                                 _password_prompt_messages[prompt_msg.id] = (job.id, archive_id, chat_id)
                                 
                                 try:
-                                    await asyncio.wait_for(event.wait(), timeout=300)
+                                    import time
+                                    start_time = time.time()
+                                    while not job_state.uploader_done.is_set() and not event.is_set():
+                                        if time.time() - start_time >= 300:
+                                            raise asyncio.TimeoutError()
+                                        try:
+                                            await asyncio.wait_for(event.wait(), timeout=2.0)
+                                        except asyncio.TimeoutError:
+                                            pass
+                                    if job_state.uploader_done.is_set():
+                                        return
                                     new_password = data["password"]
                                     
                                     import json
@@ -671,7 +690,13 @@ class QueueManager:
                                  _conversion_events[job.id] = {}
                              _conversion_events[job.id][conv_id] = asyncio.Event()
 
-                             await _conversion_events[job.id][conv_id].wait()
+                             while not job_state.uploader_done.is_set() and not _conversion_events[job.id][conv_id].is_set():
+                                 try:
+                                     await asyncio.wait_for(_conversion_events[job.id][conv_id].wait(), timeout=2.0)
+                                 except asyncio.TimeoutError:
+                                     pass
+                             if job_state.uploader_done.is_set():
+                                 return
                              choice = _conversion_choices.get(job.id, {}).get(conv_id)
 
                          if choice == "mp4":
@@ -779,7 +804,13 @@ class QueueManager:
                                 _conversion_events[job.id] = {}
                             _conversion_events[job.id][conv_id] = asyncio.Event()
 
-                            await _conversion_events[job.id][conv_id].wait()
+                            while not job_state.uploader_done.is_set() and not _conversion_events[job.id][conv_id].is_set():
+                                try:
+                                    await asyncio.wait_for(_conversion_events[job.id][conv_id].wait(), timeout=2.0)
+                                except asyncio.TimeoutError:
+                                    pass
+                            if job_state.uploader_done.is_set():
+                                return
                             choice = _conversion_choices.get(job.id, {}).get(conv_id)
 
                         if choice == "mp3":
