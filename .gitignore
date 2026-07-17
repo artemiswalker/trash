@@ -1,9 +1,7 @@
+data/
+logs/
 .venv
-app/__pycache__/
-app/__pycache__/*
 .env
-app/conversion/__pycache__/*
-app/conversion/__pycache__
-app/conversion/*/__pycache__/*
-app/conversion/*/__pycache__
+**/__pycache__/
+*.py[cod]
 *.zip

@@ -3,6 +3,7 @@ from __future__ import annotations
 from .video import convert_video_async, split_video_async
 from .image import convert_image_to_png_async
 from .audio import convert_audio_async
+from ..uploader.filter import should_ignore_file
 from .telegram import (
     _conversion_ids,
     _conversion_events,
@@ -29,6 +30,8 @@ __all__ = [
     "convert_image_to_png_async",
     "convert_audio_async",
     "split_video_async",
+    "should_ignore_file",
     "handle_conversion_choice",
 ]
+
 

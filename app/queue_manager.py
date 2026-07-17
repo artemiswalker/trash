@@ -13,7 +13,7 @@ from pyrogram.types import LinkPreviewOptions, ForceReply, Message
 
 from .config import settings
 from .db import Job, JobStatus, JobStore
-from .uploader import upload_file, UploadTooLarge, handle_large_file
+from .uploader import upload_file, UploadTooLarge, handle_large_file, should_ignore_file
 from .conversion import (
     convert_media_async,
     convert_audio_async,
@@ -255,7 +255,7 @@ class QueueManager:
                         if not dest_dir.exists():
                             continue
                         try:
-                            on_disk = sum(p.stat().st_size for p in dest_dir.rglob("*") if p.is_file())
+                            on_disk = sum(p.stat().st_size for p in dest_dir.rglob("*") if p.is_file() and not should_ignore_file(p))
                             current_size = on_disk + job_state.deleted_bytes
                         except Exception:
                             continue
@@ -387,7 +387,17 @@ class QueueManager:
                 return
 
             try:
-                files = sorted(p for p in dest_dir.rglob("*") if p.is_file())
+                for p in list(dest_dir.rglob("*")):
+                    if p.is_file() and should_ignore_file(p):
+                        try:
+                            p.unlink()
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+            try:
+                files = sorted(p for p in dest_dir.rglob("*") if p.is_file() and not should_ignore_file(p))
             except Exception:
                 return
 
@@ -954,7 +964,7 @@ class QueueManager:
 
                 try:
                     if dest_dir.exists():
-                        files = sorted(p for p in dest_dir.rglob("*") if p.is_file())
+                        files = sorted(p for p in dest_dir.rglob("*") if p.is_file() and not should_ignore_file(p))
                         for f in files:
                             db_job = await self.store.get_job(job.id)
                             if not db_job or db_job.status == JobStatus.CANCELLED or job_state.uploader_done.is_set():
@@ -1009,7 +1019,7 @@ class QueueManager:
                     has_completed_file = False
                     if dest_dir.exists():
                         try:
-                            files = [p for p in dest_dir.rglob("*") if p.is_file() and not p.name.endswith(".part")]
+                            files = [p for p in dest_dir.rglob("*") if p.is_file() and not p.name.endswith(".part") and not should_ignore_file(p)]
                             for f in files:
                                 sz1 = f.stat().st_size
                                 await asyncio.sleep(0.5)
@@ -1031,7 +1041,7 @@ class QueueManager:
                     has_pending = False
                     if dest_dir.exists():
                         try:
-                            files = [p for p in dest_dir.rglob("*") if p.is_file() and not p.name.endswith(".part")]
+                            files = [p for p in dest_dir.rglob("*") if p.is_file() and not p.name.endswith(".part") and not should_ignore_file(p)]
                             pending = [
                                 f for f in files
                                 if str(f.relative_to(dest_dir)) not in job_state.uploaded_filenames
