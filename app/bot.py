@@ -18,7 +18,7 @@ from .db import Job, JobStatus, JobStore
 from .downloader import GalleryDLNotFound, run_with_progress
 from .uploader import UploadTooLarge, upload_file
 from .middleware import is_job_owner
-from .status import (
+from .manager import (
     format_size,
     make_progress_bar,
     safe_edit,
@@ -34,8 +34,8 @@ from .status import (
     compile_extraction_failed_status_text,
     compile_extraction_success_status_text,
 )
-from . import status
-from .archive import (
+from . import manager as status
+from .manager.archive import (
     _archive_ids,
     _archive_events,
     _archive_choices,
@@ -87,7 +87,7 @@ app = Client(
     bot_token=settings.tg_bot_token,
     workdir=str(settings.data_dir),
 )
-from .queue_manager import queue_manager, _password_prompt_events, _password_prompt_messages
+from .manager import queue_manager, _password_prompt_events, _password_prompt_messages
 _shutdown_event = asyncio.Event()
 
 
@@ -198,7 +198,7 @@ async def status_cmd(_, message: Message) -> None:
             job = await store.get_job(job_state.job_id)
             if not job:
                 continue
-            from .status import compile_job_status_text
+            from .manager import compile_job_status_text
             job_text = compile_job_status_text(job, job_state)
             response += job_text + "\n"
     else:

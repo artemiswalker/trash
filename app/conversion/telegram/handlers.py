@@ -4,7 +4,7 @@ import asyncio
 import logging
 from pyrogram import Client
 from pyrogram.types import CallbackQuery, LinkPreviewOptions
-from ...status import compile_conversion_choice_status_text
+from ...manager.status import compile_conversion_choice_status_text
 
 log = logging.getLogger(__name__)
 

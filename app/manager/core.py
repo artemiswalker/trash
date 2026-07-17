@@ -6,70 +6,36 @@ import random
 import time
 import shutil
 from pathlib import Path
-from typing import Callable, Coroutine, Optional
+from typing import Optional
 
 from pyrogram import Client
-from pyrogram.types import LinkPreviewOptions, ForceReply, Message
+from pyrogram.types import LinkPreviewOptions, Message, ForceReply
 
-from .config import settings
-from .db import Job, JobStatus, JobStore
-from .uploader import upload_file, UploadTooLarge, handle_large_file, should_ignore_file
-from .conversion import (
-    convert_media_async,
-    convert_audio_async,
-    CONVERSION_EXT,
-    AUDIO_CONVERSION_EXT,
-    _conversion_ids,
-    _conversion_events,
-    _conversion_choices,
-    _converted_files
+from ..config import settings
+from ..db import Job, JobStatus, JobStore
+# conversion and archive imports moved inside methods to break circular dependencies
+
+# Local imports from manager package
+from .state import JobState
+from .status import (
+    safe_edit,
+    compile_job_status_text,
+    compile_archive_prompt_text,
+    compile_extraction_status_text,
+    compile_extraction_success_status_text,
+    compile_extraction_failed_status_text,
+    compile_conversion_prompt_text,
+    compile_conversion_running_status_text,
+    compile_conversion_failed_status_text,
+    compile_audio_conversion_prompt_text,
+    compile_audio_conversion_running_status_text,
+    compile_audio_conversion_failed_status_text,
 )
-from .archive import (
-    extract_archive_async,
-    ARCHIVE_EXT,
-    ArchivePasswordRequired,
-    _archive_ids,
-    _archive_events,
-    _archive_choices,
-    _extracted_archives,
-    _extracted_file_names
-)
-from .downloader import GalleryDLNotFound
 
 log = logging.getLogger(__name__)
 
 _password_prompt_events: dict[int, dict[str, tuple[asyncio.Event, dict]]] = {}
 _password_prompt_messages: dict[int, tuple[int, str, int]] = {}
-
-
-class JobState:
-    def __init__(self, job: Job, dest_dir: Path):
-        self.job = job
-        self.job_id = job.id
-        self.dest_dir = dest_dir
-        self.downloader_done = asyncio.Event()
-        self.uploader_done = asyncio.Event()
-        self.trigger_event = asyncio.Event()
-        self.download_speed = 0.0
-        self.total_downloaded_bytes = 0
-        self.download_count = 0
-        self.download_pct = 0.0
-        self.current_download_file = None
-        self.upload_speed = 0.0
-        self.current_upload_pct = 0.0
-        self.current_upload_file = None
-        self.sent = 0
-        self.skipped = []
-        self.uploaded_filenames = set()
-        self.uploading_files = set()
-        self.active_process = None
-        self.msg_id = job.status_message_id
-        self.last_edited_text = ""
-        self.session_uploaded_count = 0
-        self.deleted_bytes = 0
-        self.initial_download_msg = None
-        self.is_converting = False
-        self.conversion_file = None
 
 
 class QueueManager:
@@ -97,7 +63,7 @@ class QueueManager:
         
         # Start the global aria2c daemon
         try:
-            from .downloader import start_aria2_daemon
+            from ..downloader import start_aria2_daemon
             await start_aria2_daemon()
         except Exception as e:
             log.error("Failed to start global aria2c daemon at QueueManager startup: %s", e)
@@ -122,13 +88,12 @@ class QueueManager:
         
         # Stop the global aria2c daemon
         try:
-            from .downloader import stop_aria2_daemon
+            from ..downloader import stop_aria2_daemon
             await stop_aria2_daemon()
         except Exception as e:
             log.error("Failed to stop global aria2c daemon at QueueManager shutdown: %s", e)
 
         log.info("Queue manager stopped")
-
 
     async def add_job(self, job_id: int) -> None:
         await self.download_queue.put(job_id)
@@ -255,6 +220,7 @@ class QueueManager:
                         if not dest_dir.exists():
                             continue
                         try:
+                            from ..uploader import should_ignore_file
                             on_disk = sum(p.stat().st_size for p in dest_dir.rglob("*") if p.is_file() and not should_ignore_file(p))
                             current_size = on_disk + job_state.deleted_bytes
                         except Exception:
@@ -280,7 +246,7 @@ class QueueManager:
                 monitor_task = asyncio.create_task(monitor_download_speed())
 
             if is_unzip:
-                from .downloader import DownloadResult
+                from ..downloader import DownloadResult
                 archive_files = []
                 if dest_dir.exists():
                     archive_files = [p for p in dest_dir.iterdir() if p.is_file()]
@@ -302,11 +268,10 @@ class QueueManager:
                     if name:
                         job_state.torrent_name = name
 
-                from .downloader import download_torrent_async
+                from ..downloader import download_torrent_async
                 result = await download_torrent_async(
                     job.url, dest_dir, on_progress=on_torrent_progress, register_proc=reg
                 )
-
 
             else:
                 extra_args = None
@@ -323,7 +288,7 @@ class QueueManager:
                         job_state.current_download_file = filename
                     job_state.trigger_event.set()
 
-                from .downloader import run_with_progress
+                from ..downloader import run_with_progress
                 result = await run_with_progress(
                     job.url, dest_dir, on_progress=on_download_progress, extra_args=extra_args, register_proc=reg
                 )
@@ -331,7 +296,7 @@ class QueueManager:
             job_state.downloader_result = result
             log.info("Download finished for job #%s (ok=%s)", job.id, result.ok)
         except Exception as e:
-            from .downloader import DownloadResult
+            from ..downloader import DownloadResult
             log.exception("Download failed for job #%s", job.id)
             job_state.downloader_result = DownloadResult(ok=False, error_tail=str(e))
         finally:
@@ -342,6 +307,27 @@ class QueueManager:
                 await asyncio.gather(monitor_task, return_exceptions=True)
 
     async def _process_upload(self, job_state: JobState) -> None:
+        from ..conversion import (
+            convert_media_async,
+            convert_audio_async,
+            CONVERSION_EXT,
+            AUDIO_CONVERSION_EXT,
+            _conversion_ids,
+            _conversion_events,
+            _conversion_choices,
+            _converted_files
+        )
+        from .archive import (
+            extract_archive_async,
+            ARCHIVE_EXT,
+            ArchivePasswordRequired,
+            _archive_ids,
+            _archive_events,
+            _archive_choices,
+            _extracted_archives,
+            _extracted_file_names
+        )
+
         job = job_state.job
         chat_id = job.chat_id
         dest_dir = job_state.dest_dir
@@ -367,7 +353,6 @@ class QueueManager:
                         break
                         
                     if job_state.msg_id:
-                        from .status import compile_job_status_text
                         status_text = compile_job_status_text(db_job, job_state)
                         if status_text != job_state.last_edited_text:
                             if await safe_edit(self.client, chat_id, job_state.msg_id, status_text):
@@ -385,6 +370,8 @@ class QueueManager:
             nonlocal job
             if not dest_dir.exists():
                 return
+
+            from ..uploader import should_ignore_file
 
             try:
                 for p in list(dest_dir.rglob("*")):
@@ -411,7 +398,6 @@ class QueueManager:
                 if str(f.relative_to(dest_dir)) not in job_state.uploaded_filenames
                 and str(f.relative_to(dest_dir)) not in job_state.uploading_files
             ]
-
 
             for f in pending:
                 if not job_state.downloader_done.is_set():
@@ -446,7 +432,6 @@ class QueueManager:
                     else:
                         if job.id not in _archive_choices or archive_id not in _archive_choices[job.id]:
                             from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-                            from .status import compile_archive_prompt_text
                             prompt_text = compile_archive_prompt_text(job.id, f.name)
                             kb = InlineKeyboardMarkup([
                                 [
@@ -470,7 +455,6 @@ class QueueManager:
                             _extracted_archives[job.id] = set()
                         _extracted_archives[job.id].add(f_rel)
 
-                        from .status import compile_extraction_status_text
                         status_msg = await safe_send(
                             self.client,
                             chat_id,
@@ -524,12 +508,11 @@ class QueueManager:
                                         await self.client.delete_messages(chat_id, status_msg.id)
                                 except Exception:
                                     pass
-
-                                from .status import compile_extraction_success_status_text
+                                end_extraction_msg = compile_extraction_success_status_text(job.id, f.name)
                                 success_msg = await safe_send(
                                     self.client,
                                     chat_id,
-                                    compile_extraction_success_status_text(job.id, f.name),
+                                    end_extraction_msg,
                                     link_preview_options=LinkPreviewOptions(is_disabled=True)
                                 )
                                 async def delete_success_msg(m):
@@ -549,7 +532,6 @@ class QueueManager:
                                         await self.client.delete_messages(chat_id, status_msg.id)
                                 except Exception:
                                     pass
-                                from .status import compile_extraction_failed_status_text
                                 fail_msg = await safe_send(
                                     self.client,
                                     chat_id,
@@ -675,7 +657,6 @@ class QueueManager:
                          conversion_prompt_msg_id = None
                          if choice is None:
                              from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-                             from .status import compile_conversion_prompt_text
                              keyboard = InlineKeyboardMarkup([
                                  [
                                      InlineKeyboardButton("Convert to MP4", callback_data=f"convert_mp4:{job.id}:{conv_id}"),
@@ -703,7 +684,6 @@ class QueueManager:
                              output_name = f.stem + "_converted.mp4"
                              output_path = f.parent / output_name
 
-                             from .status import compile_conversion_running_status_text
                              conv_msg = await safe_send(
                                  self.client,
                                  chat_id,
@@ -742,7 +722,6 @@ class QueueManager:
                                  break
                              else:
                                  log.error("Failed to convert video %s", f.name)
-                                 from .status import compile_conversion_failed_status_text
                                  fail_msg = await safe_send(
                                      self.client,
                                      chat_id,
@@ -786,7 +765,6 @@ class QueueManager:
                         conversion_prompt_msg_id = None
                         if choice is None:
                             from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-                            from .status import compile_audio_conversion_prompt_text
                             keyboard = InlineKeyboardMarkup([
                                 [
                                     InlineKeyboardButton("Convert to MP3", callback_data=f"convert_mp3:{job.id}:{conv_id}"),
@@ -814,7 +792,6 @@ class QueueManager:
                             output_name = f.stem + "_converted.mp3"
                             output_path = f.parent / output_name
 
-                            from .status import compile_audio_conversion_running_status_text
                             conv_msg = await safe_send(
                                 self.client,
                                 chat_id,
@@ -853,7 +830,6 @@ class QueueManager:
                                 break
                             else:
                                 log.error("Failed to convert audio %s", f.name)
-                                from .status import compile_audio_conversion_failed_status_text
                                 fail_msg = await safe_send(
                                     self.client,
                                     chat_id,
@@ -879,6 +855,7 @@ class QueueManager:
                                 pass
 
                 # Handle large files (>1.95GB) splitting before upload
+                from ..uploader import handle_large_file, upload_file, UploadTooLarge
                 try:
                     split_parts = await handle_large_file(f, bool(job.split_large_files))
                 except Exception as sle:
@@ -886,15 +863,12 @@ class QueueManager:
                     split_parts = [f]
 
                 if not split_parts:
-                    # File was skipped (deleted because it was too large and split was false or failed)
                     await self.store.mark_uploaded(job.id, f_rel)
                     break
 
                 if len(split_parts) == 1 and split_parts[0] == f:
-                    # File was not split, proceed normally
                     pass
                 else:
-                    # File was split/deleted. Mark the original file as complete in the database and break to scan the parts
                     await self.store.mark_uploaded(job.id, f_rel)
                     break
 
@@ -958,6 +932,17 @@ class QueueManager:
                     await asyncio.sleep(delay)
 
         async def run_uploader() -> None:
+            from ..uploader import should_ignore_file
+            from ..conversion import (
+                convert_media_async,
+                convert_audio_async,
+                CONVERSION_EXT,
+                AUDIO_CONVERSION_EXT,
+                _conversion_ids,
+                _conversion_events,
+                _conversion_choices,
+                _converted_files
+            )
             if is_torrent:
                 while not job_state.downloader_done.is_set():
                     await asyncio.sleep(2.0)
@@ -1033,7 +1018,6 @@ class QueueManager:
                         break
                     await asyncio.sleep(2.0)
 
-
             while True:
                 await perform_uploads()
 
@@ -1103,6 +1087,9 @@ class QueueManager:
             updater_task.cancel()
             await asyncio.gather(updater_task, return_exceptions=True)
             
+            from .archive import _archive_ids, _archive_events, _archive_choices, _extracted_archives, _extracted_file_names
+            from ..conversion import _conversion_ids, _conversion_events, _conversion_choices, _converted_files
+
             _archive_ids.pop(job.id, None)
             _archive_events.pop(job.id, None)
             _archive_choices.pop(job.id, None)
@@ -1133,30 +1120,6 @@ async def safe_send(client: Client, chat_id: int, text: str, **kwargs) -> Messag
     return None
 
 
-async def safe_edit(client: Client, chat_id: int, message_id: int, text: str) -> bool:
-    from pyrogram.errors import FloodWait, MessageNotModified
-    try:
-        await client.edit_message_text(chat_id, message_id, text, link_preview_options=LinkPreviewOptions(is_disabled=True))
-        return True
-    except MessageNotModified:
-        return True
-    except FloodWait as e:
-        log.warning("Telegram FloodWait: waiting %s seconds", e.value)
-        await asyncio.sleep(e.value + 1)
-        return False
-    except Exception as e:
-        log.warning("Failed to edit status message: %s", e)
-        return False
-
-
-def format_size(size_bytes: float) -> str:
-    for unit in ["B", "KB", "MB", "GB", "TB"]:
-        if size_bytes < 1024.0:
-            return f"{size_bytes:.1f} {unit}"
-        size_bytes /= 1024.0
-    return f"{size_bytes:.1f} PB"
-
-
 async def log_upload(job_id: int, filename: str) -> None:
     log_path = settings.log_dir / "uploads.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1167,8 +1130,5 @@ async def log_upload(job_id: int, filename: str) -> None:
 
     await asyncio.to_thread(append_to_file)
 
-
-def is_job_owner(chat_id: int, job: Job) -> bool:
-    return job.chat_id == chat_id
 
 queue_manager = QueueManager()

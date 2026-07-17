@@ -153,7 +153,7 @@ async def upload_file(
                 except FloodWait as e:
                     log.warning("FloodWait %ss on %s", e.value, path.name)
                     try:
-                        from ..queue_manager import queue_manager
+                        from ..manager import queue_manager
                         queue_manager.notify_floodwait(e.value)
                     except Exception:
                         pass
