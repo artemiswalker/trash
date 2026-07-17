@@ -220,8 +220,7 @@ class QueueManager:
                         if not dest_dir.exists():
                             continue
                         try:
-                            from ..uploader import should_ignore_file
-                            on_disk = sum(p.stat().st_size for p in dest_dir.rglob("*") if p.is_file() and not should_ignore_file(p))
+                            on_disk = sum(p.stat().st_size for p in dest_dir.rglob("*") if p.is_file())
                             current_size = on_disk + job_state.deleted_bytes
                         except Exception:
                             continue
