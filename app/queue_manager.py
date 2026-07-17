@@ -97,7 +97,7 @@ class QueueManager:
         
         # Start the global aria2c daemon
         try:
-            from .torrent import start_aria2_daemon
+            from .downloader import start_aria2_daemon
             await start_aria2_daemon()
         except Exception as e:
             log.error("Failed to start global aria2c daemon at QueueManager startup: %s", e)
@@ -122,7 +122,7 @@ class QueueManager:
         
         # Stop the global aria2c daemon
         try:
-            from .torrent import stop_aria2_daemon
+            from .downloader import stop_aria2_daemon
             await stop_aria2_daemon()
         except Exception as e:
             log.error("Failed to stop global aria2c daemon at QueueManager shutdown: %s", e)
@@ -302,7 +302,7 @@ class QueueManager:
                     if name:
                         job_state.torrent_name = name
 
-                from .torrent import download_torrent_async
+                from .downloader import download_torrent_async
                 result = await download_torrent_async(
                     job.url, dest_dir, on_progress=on_torrent_progress, register_proc=reg
                 )

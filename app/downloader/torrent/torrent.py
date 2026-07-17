@@ -10,7 +10,7 @@ import urllib.request
 from pathlib import Path
 from typing import Callable, Optional
 
-from .downloader import DownloadResult
+from ..gallery_dl import DownloadResult
 
 log = logging.getLogger(__name__)
 
@@ -45,7 +45,6 @@ class Aria2DownloadTask:
     def kill(self):
         log.info("Cancelling Aria2 download GID %s", self.gid)
         try:
-            # RPC call is run in a separate thread to prevent blocking
             sync_rpc_call(self.port, "aria2.forceRemove", [self.gid])
         except Exception as e:
             log.warning("Failed to forceRemove GID %s: %s", self.gid, e)
@@ -101,7 +100,6 @@ async def start_aria2_daemon() -> None:
     port = get_free_port()
     tracker_arg = f"--bt-tracker={','.join(TRACKERS)}"
     
-    # Create logs directory under data if it exists or use default ./logs
     log_dir = Path("./logs").resolve()
     log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / "aria2c_daemon.log"
@@ -139,7 +137,6 @@ async def start_aria2_daemon() -> None:
         log.exception("Failed to start global aria2c daemon")
         return
 
-    # Wait up to 5 seconds for the daemon to start listening
     daemon_ready = False
     for _ in range(25):
         try:
@@ -191,8 +188,6 @@ async def download_torrent_async(
     if target.startswith("torrent:"):
         target = target[len("torrent:"):]
 
-
-    # Add the download via RPC
     gid = None
     try:
         if is_torrent_file:
@@ -216,7 +211,6 @@ async def download_torrent_async(
     if not gid:
         return DownloadResult(ok=False, error_tail="aria2c daemon did not return a GID.")
 
-    # Register mock task for cancellation
     task_wrapper = Aria2DownloadTask(port, gid)
     if register_proc:
         register_proc(task_wrapper)
@@ -227,7 +221,6 @@ async def download_torrent_async(
     last_active_time = start_time
     try:
         while True:
-            # Check if global daemon subprocess is still running
             if proc.returncode is not None:
                 log.error("Global aria2c daemon stopped unexpectedly with code %s", proc.returncode)
                 break
@@ -242,12 +235,11 @@ async def download_torrent_async(
                 await asyncio.sleep(2.0)
                 continue
 
-            # Handle followedBy transition for magnet links downloading metadata (check before status == "complete")
             followed_by = result.get("followedBy")
             if followed_by and len(followed_by) > 0:
                 log.info("Download transitioned to new GID: %s -> %s", gid, followed_by[0])
                 gid = followed_by[0]
-                task_wrapper.gid = gid  # Update mock task GID for cancellation
+                task_wrapper.gid = gid
                 await asyncio.sleep(1.0)
                 continue
 
@@ -262,7 +254,6 @@ async def download_torrent_async(
                 error_tail = f"Aria2 error code {error_code}: {error_msg}"
                 break
 
-            # Calculate progress and extract peer counts
             completed_len = float(result.get("completedLength", 0))
             total_len = float(result.get("totalLength", 0))
             speed = float(result.get("downloadSpeed", 0))
@@ -271,14 +262,12 @@ async def download_torrent_async(
 
             pct = (completed_len * 100.0 / total_len) if total_len > 0 else 0.0
 
-            # Dead torrent timeout detection (no progress, no speed, and no active seeders for 5 minutes)
             now = asyncio.get_event_loop().time()
             if completed_len > 0 or speed > 0 or seeders > 0:
                 last_active_time = now
-            elif now - last_active_time > 300.0:  # 5 minutes
+            elif now - last_active_time > 300.0:
                 raise Exception("Torrent is dead (stuck at 0% with no active seeders/peers).")
 
-            # Extract resolved torrent name
             torrent_name = None
             bt = result.get("bittorrent", {})
             info = bt.get("info", {})
@@ -306,7 +295,6 @@ async def download_torrent_async(
         log.exception("Exception in progress monitoring loop")
         error_tail = str(e)
     finally:
-        # Remove task from aria2c to clean up memory
         try:
             await async_rpc_call(port, "aria2.removeDownloadResult", [gid])
         except Exception:

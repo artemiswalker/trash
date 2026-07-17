@@ -3,12 +3,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import shutil
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import AsyncIterator, Callable, Optional
+from typing import Callable, Optional
 
-from .config import settings
-from .rate_limiter import Backoff, looks_rate_limited
+from ...config import settings
+from ...rate_limiter import Backoff, looks_rate_limited
 
 log = logging.getLogger(__name__)
 
@@ -65,7 +66,6 @@ async def _stream_run(cmd: list[str]) -> tuple[int, str, Callable[[], int]]:
         assert proc.stdout is not None
         async for line in proc.stdout:
             text = line.decode(errors="replace")
-            # gallery-dl -v prints one line per file operation
             if text.strip():
                 count += 1
 
@@ -103,7 +103,6 @@ async def run_with_progress(
             "pip install gallery-dl --break-system-packages"
         )
 
-    import json
     try:
         urls = json.loads(url)
         if not isinstance(urls, list):
