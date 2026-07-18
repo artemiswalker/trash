@@ -440,7 +440,7 @@ async def unzip_cmd(_, message: Message) -> None:
     filename = doc.file_name or "archive.zip"
     ext = Path(filename).suffix.lower()
     
-    from .archive import ARCHIVE_EXT
+    from .manager.archive import ARCHIVE_EXT
     if ext not in ARCHIVE_EXT:
         supported_list = ", ".join(sorted(ARCHIVE_EXT))
         await message.reply_text(f"Unsupported archive format. Supported formats: {supported_list}")
@@ -462,7 +462,7 @@ async def unzip_cmd(_, message: Message) -> None:
     status_msg = await message.reply_text(
         f"**Job #{job.id} registered**\n"
         f"- **Archive**: `{filename}`\n\n"
-        "Downloading archive to VPS..."
+        "Downloading archive..."
     )
     await store.set_status_message(job.id, status_msg.id)
 
