@@ -449,13 +449,27 @@ class QueueManager:
                                     _archive_events[job.id] = {}
                                 _archive_events[job.id][archive_id] = asyncio.Event()
 
+                                start_t = time.time()
                                 while not job_state.uploader_done.is_set() and not _archive_events[job.id][archive_id].is_set():
+                                    if time.time() - start_t >= 15.0:
+                                        break
                                     try:
                                         await asyncio.wait_for(_archive_events[job.id][archive_id].wait(), timeout=2.0)
                                     except asyncio.TimeoutError:
                                         pass
                                 if job_state.uploader_done.is_set():
                                     return
+
+                                if not _archive_events[job.id][archive_id].is_set():
+                                    if archive_prompt_msg_id:
+                                        try:
+                                            await self.client.delete_messages(chat_id, archive_prompt_msg_id)
+                                        except Exception:
+                                            pass
+                                        archive_prompt_msg_id = None
+                                    if job.id not in _archive_choices:
+                                        _archive_choices[job.id] = {}
+                                    _archive_choices[job.id][archive_id] = "only"
                             else:
                                 if job.id not in _archive_choices:
                                     _archive_choices[job.id] = {}
@@ -693,13 +707,27 @@ class QueueManager:
                                      _conversion_events[job.id] = {}
                                  _conversion_events[job.id][conv_id] = asyncio.Event()
 
+                                 start_t = time.time()
                                  while not job_state.uploader_done.is_set() and not _conversion_events[job.id][conv_id].is_set():
+                                     if time.time() - start_t >= 15.0:
+                                         break
                                      try:
                                          await asyncio.wait_for(_conversion_events[job.id][conv_id].wait(), timeout=2.0)
                                      except asyncio.TimeoutError:
                                          pass
                                  if job_state.uploader_done.is_set():
                                      return
+
+                                 if not _conversion_events[job.id][conv_id].is_set():
+                                     if conversion_prompt_msg_id:
+                                         try:
+                                             await self.client.delete_messages(chat_id, conversion_prompt_msg_id)
+                                         except Exception:
+                                             pass
+                                         conversion_prompt_msg_id = None
+                                     if job.id not in _conversion_choices:
+                                         _conversion_choices[job.id] = {}
+                                     _conversion_choices[job.id][conv_id] = "orig"
                              else:
                                  if job.id not in _conversion_choices:
                                      _conversion_choices[job.id] = {}
@@ -806,17 +834,35 @@ class QueueManager:
                             if prompt_msg:
                                 conversion_prompt_msg_id = prompt_msg.id
 
-                            if job.id not in _conversion_events:
-                                _conversion_events[job.id] = {}
-                            _conversion_events[job.id][conv_id] = asyncio.Event()
+                                if job.id not in _conversion_events:
+                                    _conversion_events[job.id] = {}
+                                _conversion_events[job.id][conv_id] = asyncio.Event()
 
-                            while not job_state.uploader_done.is_set() and not _conversion_events[job.id][conv_id].is_set():
-                                try:
-                                    await asyncio.wait_for(_conversion_events[job.id][conv_id].wait(), timeout=2.0)
-                                except asyncio.TimeoutError:
-                                    pass
-                            if job_state.uploader_done.is_set():
-                                return
+                                start_t = time.time()
+                                while not job_state.uploader_done.is_set() and not _conversion_events[job.id][conv_id].is_set():
+                                    if time.time() - start_t >= 15.0:
+                                        break
+                                    try:
+                                        await asyncio.wait_for(_conversion_events[job.id][conv_id].wait(), timeout=2.0)
+                                    except asyncio.TimeoutError:
+                                        pass
+                                if job_state.uploader_done.is_set():
+                                    return
+
+                                if not _conversion_events[job.id][conv_id].is_set():
+                                    if conversion_prompt_msg_id:
+                                        try:
+                                            await self.client.delete_messages(chat_id, conversion_prompt_msg_id)
+                                        except Exception:
+                                            pass
+                                        conversion_prompt_msg_id = None
+                                    if job.id not in _conversion_choices:
+                                        _conversion_choices[job.id] = {}
+                                    _conversion_choices[job.id][conv_id] = "orig"
+                            else:
+                                if job.id not in _conversion_choices:
+                                    _conversion_choices[job.id] = {}
+                                _conversion_choices[job.id][conv_id] = "orig"
                             choice = _conversion_choices.get(job.id, {}).get(conv_id)
 
                         if choice == "mp3":
