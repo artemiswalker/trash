@@ -120,6 +120,7 @@ class QueueManager:
         job_state.uploader_done.set()
         job_state.trigger_event.set()
         shutil.rmtree(job_state.dest_dir, ignore_errors=True)
+        shutil.rmtree(job_state.dest_dir.parent / f"{job_state.dest_dir.name}_extracted", ignore_errors=True)
         self.jobs.pop(job_id, None)
         return True
 
@@ -330,6 +331,7 @@ class QueueManager:
         job = job_state.job
         chat_id = job.chat_id
         dest_dir = job_state.dest_dir
+        extract_dir = dest_dir.parent / f"{dest_dir.name}_extracted"
         is_torrent = (
             job.url.startswith("magnet:") or
             job.url.startswith("torrent:") or
@@ -372,18 +374,25 @@ class QueueManager:
 
             from ..uploader import should_ignore_file
 
-            try:
-                for p in list(dest_dir.rglob("*")):
-                    if p.is_file() and should_ignore_file(p):
-                        try:
-                            p.unlink()
-                        except Exception:
-                            pass
-            except Exception:
-                pass
+            if job_state.downloader_done.is_set() and job_state.uploader_done.is_set():
+                try:
+                    for d in (dest_dir, extract_dir):
+                        if d.exists():
+                            for p in list(d.rglob("*")):
+                                if p.is_file() and should_ignore_file(p):
+                                    try:
+                                        p.unlink()
+                                    except Exception:
+                                        pass
+                except Exception:
+                    pass
 
             try:
-                files = sorted(p for p in dest_dir.rglob("*") if p.is_file() and not should_ignore_file(p))
+                files = []
+                if dest_dir.exists():
+                    files.extend(sorted(p for p in dest_dir.rglob("*") if p.is_file() and not should_ignore_file(p)))
+                if extract_dir.exists():
+                    files.extend(sorted(p for p in extract_dir.rglob("*") if p.is_file() and not should_ignore_file(p)))
             except Exception:
                 return
 
@@ -392,12 +401,16 @@ class QueueManager:
                 await self.store.update_progress(job.id, total_files=db_total)
                 job = await self.store.get_job(job.id)
 
-            pending = [
-                f for f in files
-                if str(f.relative_to(dest_dir)) not in job_state.uploaded_filenames
-                and str(f.relative_to(dest_dir)) not in job_state.uploading_files
-                and str(f.relative_to(dest_dir)) not in job_state.failed_uploads
-            ]
+            pending = []
+            for f in files:
+                try:
+                    f_rel = str(f.relative_to(extract_dir))
+                except ValueError:
+                    f_rel = str(f.relative_to(dest_dir))
+                if (f_rel not in job_state.uploaded_filenames and 
+                    f_rel not in job_state.uploading_files and 
+                    f_rel not in job_state.failed_uploads):
+                    pending.append(f)
 
             for f in pending:
                 if not job_state.downloader_done.is_set():
@@ -417,7 +430,10 @@ class QueueManager:
                 if job_state.uploader_done.is_set():
                     return
 
-                f_rel = str(f.relative_to(dest_dir))
+                try:
+                    f_rel = str(f.relative_to(extract_dir))
+                except ValueError:
+                    f_rel = str(f.relative_to(dest_dir))
 
                 is_archive = f.suffix.lower() in ARCHIVE_EXT
                 if is_archive:
@@ -488,9 +504,10 @@ class QueueManager:
                             link_preview_options=LinkPreviewOptions(is_disabled=True)
                         )
 
+                        extract_dir.mkdir(parents=True, exist_ok=True)
                         before_files = set()
                         try:
-                            before_files = {p.resolve() for p in dest_dir.rglob("*") if p.is_file()}
+                            before_files = {p.resolve() for p in extract_dir.rglob("*") if p.is_file()}
                         except Exception:
                             pass
 
@@ -504,12 +521,12 @@ class QueueManager:
                                 except Exception:
                                     pass
 
-                            extracted = await extract_archive_async(f, dest_dir, password=password)
+                            extracted = await extract_archive_async(f, extract_dir, password=password)
                             if extracted:
                                 log.info("Successfully extracted archive %s", f.name)
                                 job_state.trigger_event.set()
                                 try:
-                                    after_files = {p.resolve() for p in dest_dir.rglob("*") if p.is_file()}
+                                    after_files = {p.resolve() for p in extract_dir.rglob("*") if p.is_file()}
                                     new_files = after_files - before_files
                                     if job.id not in _extracted_file_names:
                                         _extracted_file_names[job.id] = set()
@@ -1124,6 +1141,19 @@ class QueueManager:
                                 has_pending = True
                         except Exception:
                             pass
+                    if extract_dir.exists():
+                        try:
+                            files = [p for p in extract_dir.rglob("*") if p.is_file() and not p.name.endswith(".part") and not should_ignore_file(p)]
+                            pending = [
+                                f for f in files
+                                if str(f.relative_to(extract_dir)) not in job_state.uploaded_filenames
+                                and str(f.relative_to(extract_dir)) not in job_state.uploading_files
+                                and str(f.relative_to(extract_dir)) not in job_state.failed_uploads
+                            ]
+                            if pending:
+                                has_pending = True
+                        except Exception:
+                            pass
                     if not has_pending:
                         break
 
@@ -1165,13 +1195,16 @@ class QueueManager:
                 
             await report(summary)
             shutil.rmtree(dest_dir, ignore_errors=True)
+            shutil.rmtree(extract_dir, ignore_errors=True)
             
         except Exception as e:
             log.exception("Upload process failed for job #%s", job.id)
             await self.store.update_progress(job.id, status=JobStatus.FAILED, error=str(e), url="")
             await report(f"Job failed with error: {e}")
             shutil.rmtree(dest_dir, ignore_errors=True)
+            shutil.rmtree(extract_dir, ignore_errors=True)
         finally:
+            shutil.rmtree(extract_dir, ignore_errors=True)
             job_state.uploader_done.set()
             updater_task.cancel()
             await asyncio.gather(updater_task, return_exceptions=True)
