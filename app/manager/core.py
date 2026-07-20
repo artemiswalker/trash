@@ -555,9 +555,40 @@ class QueueManager:
                                 except Exception:
                                     pass
 
-                            extracted = await extract_archive_async(f, extract_dir, password=password)
+                            # Merge split parts if this is a split archive
+                            archive_to_extract = f
+                            if f_split and f_split["part"] == 1:
+                                if f_split["type"] in ("numeric_suffix", "part_infix") and f_split.get("ext"):
+                                    merged_name = f"{f_split['prefix']}.{f_split['ext']}"
+                                else:
+                                    merged_name = f_split['prefix']
+                                    
+                                merged_path = f.parent / merged_name
+                                
+                                # Find all parts and sort them
+                                parts_files = []
+                                for sibling in dest_dir.iterdir():
+                                    if sibling.is_file() and f_split["pattern"].match(sibling.name):
+                                        sib_info = get_split_archive_info(sibling.name)
+                                        if sib_info:
+                                            parts_files.append((sib_info["part"], sibling))
+                                            
+                                parts_files.sort(key=lambda x: x[0])
+                                
+                                try:
+                                    log.info("Merging split parts into %s", merged_name)
+                                    with open(merged_path, "wb") as outfile:
+                                        for _, part_file in parts_files:
+                                            with open(part_file, "rb") as infile:
+                                                shutil.copyfileobj(infile, outfile)
+                                    archive_to_extract = merged_path
+                                except Exception:
+                                    log.exception("Failed to merge split archive parts")
+                                    archive_to_extract = f
+
+                            extracted = await extract_archive_async(archive_to_extract, extract_dir, password=password)
                             if extracted:
-                                log.info("Successfully extracted archive %s", f.name)
+                                log.info("Successfully extracted archive %s", archive_to_extract.name)
                                 job_state.trigger_event.set()
                                 try:
                                     after_files = {p.resolve() for p in extract_dir.rglob("*") if p.is_file()}
@@ -575,6 +606,12 @@ class QueueManager:
                                     except Exception:
                                         pass
                                     job_state.uploaded_filenames.add(f_rel)
+
+                                    if archive_to_extract != f:
+                                        try:
+                                            archive_to_extract.unlink(missing_ok=True)
+                                        except Exception:
+                                            pass
 
                                     if f_split and f_split["part"] == 1:
                                         for sibling in dest_dir.iterdir():
