@@ -558,10 +558,15 @@ async def unzip_cmd(_, message: Message) -> None:
     dest_dir = (settings.downloads_dir / job.download_dir).resolve()
     dest_dir.mkdir(parents=True, exist_ok=True)
     
+    from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("Cancel", callback_data=f"cancel_job:{job.id}")]
+    ])
     status_msg = await message.reply_text(
         f"**Job #{job.id} registered**\n"
         f"- **Archive**: `{filename}`\n\n"
-        "Downloading archive..."
+        "Downloading archive...",
+        reply_markup=keyboard
     )
     await store.set_status_message(job.id, status_msg.id)
 
@@ -573,9 +578,15 @@ async def unzip_cmd(_, message: Message) -> None:
         if now - last_edit_time < 3.0 and current != total:
             return
         last_edit_time = now
+
+        db_job = await store.get_job(job.id)
+        if db_job and db_job.status == JobStatus.CANCELLED:
+            raise asyncio.CancelledError("Job cancelled by user")
+
         try:
             await status_msg.edit_text(
-                compile_unzip_download_status_text(job.id, filename, current, total)
+                compile_unzip_download_status_text(job.id, filename, current, total),
+                reply_markup=keyboard
             )
         except Exception:
             pass
@@ -585,7 +596,12 @@ async def unzip_cmd(_, message: Message) -> None:
             file_name=str(dest_dir / filename),
             progress=on_download_progress
         )
-    except Exception as e:
+    except (asyncio.CancelledError, Exception) as e:
+        db_job = await store.get_job(job.id)
+        if db_job and db_job.status == JobStatus.CANCELLED:
+            log.info("Unzip job #%s download aborted due to cancellation", job.id)
+            shutil.rmtree(dest_dir, ignore_errors=True)
+            return
         log.exception("Failed to download replied archive file")
         await status_msg.edit_text(f"Failed to download archive: {e}")
         await store.update_progress(job.id, status=JobStatus.FAILED, error=str(e), url="")

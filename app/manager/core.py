@@ -117,9 +117,15 @@ class QueueManager:
             except Exception:
                 pass
 
-        if job_state.active_task:
+        if job_state.active_download_task:
             try:
-                job_state.active_task.cancel()
+                job_state.active_download_task.cancel()
+            except Exception:
+                pass
+
+        if job_state.active_upload_task:
+            try:
+                job_state.active_upload_task.cancel()
             except Exception:
                 pass
 
@@ -153,7 +159,7 @@ class QueueManager:
                 
             try:
                 job = await self.store.get_job(job_id)
-                if not job:
+                if not job or job.status == JobStatus.CANCELLED:
                     self.download_queue.task_done()
                     continue
                     
@@ -184,6 +190,12 @@ class QueueManager:
                     self.upload_queue.task_done()
                     continue
                     
+                db_job = await self.store.get_job(job_id)
+                if not db_job or db_job.status == JobStatus.CANCELLED:
+                    self.upload_queue.task_done()
+                    self.jobs.pop(job_id, None)
+                    continue
+                    
                 await self._process_upload(job_state)
             except asyncio.CancelledError:
                 if not self.is_running:
@@ -195,7 +207,7 @@ class QueueManager:
                 self.upload_queue.task_done()
 
     async def _process_download(self, job_state: JobState) -> None:
-        job_state.active_task = asyncio.current_task()
+        job_state.active_download_task = asyncio.current_task()
         job = job_state.job
         chat_id = job.chat_id
         dest_dir = job_state.dest_dir
@@ -333,7 +345,7 @@ class QueueManager:
                 await asyncio.gather(monitor_task, return_exceptions=True)
 
     async def _process_upload(self, job_state: JobState) -> None:
-        job_state.active_task = asyncio.current_task()
+        job_state.active_upload_task = asyncio.current_task()
         from ..conversion import (
             convert_media_async,
             convert_audio_async,

@@ -174,7 +174,7 @@ async def run_with_progress(
                 returncode = await proc.wait()
             except asyncio.CancelledError:
                 try:
-                    proc.terminate()
+                    proc.kill()
                     await proc.wait()
                 except Exception:
                     pass
