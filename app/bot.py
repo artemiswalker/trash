@@ -929,11 +929,11 @@ def sanitize_gdl_args(args: list[str], url: Optional[str | list[str]] = None) ->
 
 @app.on_message(filters.reply & filters.text, group=-1)
 async def handle_password_reply(_, message: Message) -> None:
-    reply = message.reply_to_message
-    if not reply or not reply.id:
+    reply_to_message_id = message.reply_to_message_id
+    if not reply_to_message_id:
         return
     
-    prompt_info = _password_prompt_messages.get(reply.id)
+    prompt_info = _password_prompt_messages.get(reply_to_message_id)
     if not prompt_info:
         return
         
@@ -957,7 +957,7 @@ async def handle_password_reply(_, message: Message) -> None:
     except Exception:
         pass
     
-    _password_prompt_messages.pop(reply.id, None)
+    _password_prompt_messages.pop(reply_to_message_id, None)
 
 
 @app.on_message(group=-2)
