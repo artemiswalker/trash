@@ -45,6 +45,7 @@ from .manager.archive import (
     extract_archive_async,
     handle_archive_choice,
     ArchivePasswordRequired,
+    get_split_archive_info,
 )
 from .conversion import (
     _conversion_ids,
@@ -434,8 +435,101 @@ async def tor_cmd(_, message: Message) -> None:
     await store.set_status_message(job.id, status_msg.id)
 
 
+_split_archive_sessions: dict[int, dict] = {}
+
+
+def compile_split_session_text(prefix: str, ext: str, parts: dict[int, Message]) -> str:
+    sorted_parts = sorted(parts.keys())
+    parts_list = []
+    max_part = max(sorted_parts) if sorted_parts else 0
+    
+    for i in range(1, max_part + 2):
+        if i in parts:
+            filename = parts[i].document.file_name
+            parts_list.append(f"**Part {i}**: `{filename}`")
+        else:
+            if i == 1 or i <= max_part:
+                parts_list.append(f"**Part {i}**: _Waiting for file..._")
+            else:
+                break
+                
+    parts_str = "\n".join(parts_list)
+    
+    text = (
+        f"**Split Archive Session**\n"
+        f"- **Base Pattern**: `{prefix}.*`\n\n"
+        f"**Instructions:**\n"
+        f"Please upload/forward the remaining parts of this archive to this chat.\n\n"
+        f"**Parts Received:**\n"
+        f"{parts_str}\n\n"
+        f"When all parts are uploaded, click **Start Extraction** below."
+    )
+    return text
+
+
 @app.on_message(filters.command("unzip"))
 async def unzip_cmd(_, message: Message) -> None:
+    cmd_parts = (message.text or "").split(maxsplit=2)
+    if len(cmd_parts) >= 2 and cmd_parts[1].lower() == "split":
+        chat_id = message.chat.id
+        user_id = message.from_user.id if message.from_user else chat_id
+        session_key = chat_id
+        
+        print(f"[DEBUG_SPLIT] Starting /unzip split session. chat_id={chat_id}, user_id={user_id}", flush=True)
+        
+        if session_key in _split_archive_sessions:
+            old_session = _split_archive_sessions.pop(session_key)
+            if old_session.get("timeout_task"):
+                old_session["timeout_task"].cancel()
+            try:
+                await old_session["status_msg"].edit_text("**Session replaced by a new one.**")
+            except Exception:
+                pass
+                
+        password = cmd_parts[2].strip() if len(cmd_parts) > 2 else None
+        
+        from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+        
+        def get_split_session_keyboard(c_id: int, u_id: int) -> InlineKeyboardMarkup:
+            return InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("Start Extraction", callback_data=f"split_start:{c_id}:{u_id}"),
+                    InlineKeyboardButton("Cancel", callback_data=f"split_cancel:{c_id}:{u_id}")
+                ]
+            ])
+            
+        status_msg = await message.reply_text(
+            "**Split Archive Session Started**\n\n"
+            "Please send or forward the split archive parts (e.g. `.001`, `.002`, or `.part1.rar` files) to this chat.\n\n"
+            "**Waiting for files...**",
+            reply_markup=get_split_session_keyboard(chat_id, user_id)
+        )
+        
+        async def split_session_timeout(c_id: int, delay: int = 300):
+            await asyncio.sleep(delay)
+            s_key = c_id
+            if s_key in _split_archive_sessions:
+                session = _split_archive_sessions.pop(s_key)
+                try:
+                    await session["status_msg"].edit_text("**Split Archive Session Expired** (Timeout due to inactivity).")
+                except Exception:
+                    pass
+
+        timeout_task = asyncio.create_task(split_session_timeout(chat_id))
+        
+        _split_archive_sessions[session_key] = {
+            "prefix": None,
+            "ext": None,
+            "pattern": None,
+            "parts": {},
+            "status_msg": status_msg,
+            "dest_dir": None,
+            "job_id": None,
+            "password": password,
+            "timeout_task": timeout_task
+        }
+        return
+
     if not message.reply_to_message or not message.reply_to_message.document:
         await message.reply_text("Please reply to an archive file (.zip, .rar, .7z, etc.) with `/unzip`.")
         return
@@ -857,6 +951,86 @@ async def handle_password_reply(_, message: Message) -> None:
     _password_prompt_messages.pop(reply.id, None)
 
 
+@app.on_message(group=-2)
+async def handle_document_part(_, message: Message) -> None:
+    import traceback
+    try:
+        chat_id = message.chat.id
+        
+        session_key = chat_id
+        if session_key not in _split_archive_sessions:
+            return
+            
+        if not message.document:
+            return
+            
+        filename = message.document.file_name
+        print(f"[DEBUG_SPLIT] handle_document_part triggered via catch-all. chat_id={chat_id}, filename={filename}", flush=True)
+        
+        if not filename:
+            print("[DEBUG_SPLIT] filename is empty", flush=True)
+            return
+            
+        session = _split_archive_sessions[session_key]
+        
+        if session["prefix"] is None:
+            print(f"[DEBUG_SPLIT] Initializing session pattern for filename: {filename}", flush=True)
+            split_info = get_split_archive_info(filename)
+            if not split_info:
+                print(f"[DEBUG_SPLIT] get_split_archive_info returned None for {filename}", flush=True)
+                return
+                
+            session["prefix"] = split_info["prefix"]
+            session["ext"] = split_info["ext"]
+            session["pattern"] = split_info["pattern"]
+            print(f"[DEBUG_SPLIT] Pattern initialized. Prefix: {session['prefix']}, Ext: {session['ext']}", flush=True)
+            
+        if not session["pattern"].match(filename):
+            print(f"[DEBUG_SPLIT] Filename {filename} does not match active prefix: {session['prefix']}", flush=True)
+            return
+            
+        split_info = get_split_archive_info(filename)
+        if not split_info:
+            print(f"[DEBUG_SPLIT] get_split_archive_info returned None on second check for {filename}", flush=True)
+            return
+            
+        part_num = split_info["part"]
+        session["parts"][part_num] = message
+        print(f"[DEBUG_SPLIT] Part {part_num} added. Current parts: {list(session['parts'].keys())}", flush=True)
+        
+        if session.get("timeout_task"):
+            session["timeout_task"].cancel()
+            
+        async def split_session_timeout(c_id: int, delay: int = 300):
+            await asyncio.sleep(delay)
+            s_key = c_id
+            if s_key in _split_archive_sessions:
+                session = _split_archive_sessions.pop(s_key)
+                try:
+                    await session["status_msg"].edit_text("**Split Archive Session Expired** (Timeout due to inactivity).")
+                except Exception:
+                    pass
+
+        session["timeout_task"] = asyncio.create_task(split_session_timeout(chat_id))
+        
+        keyboard = session["status_msg"].reply_markup
+        new_text = compile_split_session_text(session["prefix"], session["ext"], session["parts"])
+        
+        try:
+            await session["status_msg"].edit_text(new_text, reply_markup=keyboard)
+        except Exception:
+            pass
+            
+        message.stop_propagation()
+    except Exception as e:
+        if e.__class__.__name__ == "StopPropagation":
+            raise
+        print("[DEBUG_SPLIT] Exception in handle_document_part:")
+        traceback.print_exc()
+        raise e
+
+
+
 @app.on_message(filters.text & ~filters.command(["start", "status", "cancel", "gdl", "tor", "unzip"]))
 async def handle_link(_, message: Message) -> None:
     text = (message.text or "").strip()
@@ -965,6 +1139,164 @@ async def handle_split_choice(_, callback_query: CallbackQuery) -> None:
     await callback_query.message.edit_text(status_text, link_preview_options=LinkPreviewOptions(is_disabled=True))
     await callback_query.answer("Choice registered.")
     await queue_manager.add_job(job_id)
+
+
+async def run_split_archive_download_and_extract(session: dict, status_msg: Message) -> None:
+    parts = session["parts"]
+    sorted_parts = sorted(parts.keys())
+    password = session["password"]
+    chat_id = status_msg.chat.id
+    
+    first_part_msg = parts[1]
+    filename = first_part_msg.document.file_name
+    
+    import json
+    args_json = json.dumps({"password": password}) if password else None
+
+    job = await store.create_job(chat_id, f"unzip:{filename}", split_large_files=1, args=args_json)
+    await store.update_progress(job.id, status="waiting")
+    await store.set_status_message(job.id, status_msg.id)
+
+    dest_dir = (settings.downloads_dir / job.download_dir).resolve()
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    
+    await status_msg.edit_text(
+        f"**Job #{job.id} registered**\n"
+        f"- **Archive**: `{filename}`\n\n"
+        "Starting download of parts..."
+    )
+    
+    try:
+        for idx, part_num in enumerate(sorted_parts, start=1):
+            part_msg = parts[part_num]
+            part_filename = part_msg.document.file_name
+            
+            last_edit_time = 0.0
+            async def on_download_progress(current, total):
+                nonlocal last_edit_time
+                import time
+                now = time.time()
+                if now - last_edit_time < 3.0 and current != total:
+                    return
+                last_edit_time = now
+                try:
+                    display_name = f"{part_filename} (Part {idx}/{len(sorted_parts)})"
+                    await status_msg.edit_text(
+                        compile_unzip_download_status_text(job.id, display_name, current, total)
+                    )
+                except Exception:
+                    pass
+            
+            await part_msg.download(
+                file_name=str(dest_dir / part_filename),
+                progress=on_download_progress
+            )
+            
+    except Exception as e:
+        log.exception("Failed to download replied split archive file")
+        await status_msg.edit_text(f"Failed to download archive: {e}")
+        await store.update_progress(job.id, status=JobStatus.FAILED, error=str(e), url="")
+        return
+
+    total_size = sum(parts[part_num].document.file_size or 0 for part_num in sorted_parts)
+    limit_2gb = int(1.95 * 1024 * 1024 * 1024)
+    
+    if total_size < limit_2gb:
+        await store.db.execute(
+            "UPDATE jobs SET status = ?, split_large_files = ? WHERE id = ?",
+            (JobStatus.QUEUED, 1, job.id)
+        )
+        await store.db.commit()
+        await status_msg.edit_text(
+            compile_queued_status_text(job.id, f"unzip:{filename}", "")
+        )
+        await queue_manager.add_job(job.id)
+        return
+
+    from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("Yes, split them", callback_data=f"split_yes:{job.id}"),
+            InlineKeyboardButton("No, skip them", callback_data=f"split_no:{job.id}")
+        ]
+    ])
+
+    prompt_text = compile_split_prompt_text(job.id, filename, is_unzip=True)
+    await status_msg.edit_text(prompt_text, reply_markup=keyboard)
+
+
+@app.on_callback_query(filters.regex(r"^split_cancel:(-?\d+):(-?\d+)$"))
+async def handle_split_cancel_cb(_, callback_query: CallbackQuery) -> None:
+    data = callback_query.data
+    _, chat_id_str, user_id_str = data.split(":")
+    chat_id = int(chat_id_str)
+    user_id = int(user_id_str)
+    
+    print(f"[DEBUG_SPLIT] handle_split_cancel_cb triggered. chat_id={chat_id}, user_id={user_id}", flush=True)
+    
+    req_user_id = callback_query.from_user.id if callback_query.from_user else callback_query.message.chat.id
+    if req_user_id != user_id:
+        await callback_query.answer("Unauthorized: You did not start this session.", show_alert=True)
+        return
+        
+    session_key = chat_id
+    if session_key in _split_archive_sessions:
+        session = _split_archive_sessions.pop(session_key)
+        if session.get("timeout_task"):
+            session["timeout_task"].cancel()
+        await callback_query.message.edit_text("**Split Archive Session Cancelled.**")
+        await callback_query.answer("Session cancelled.")
+    else:
+        await callback_query.answer("Session not found or already expired.", show_alert=True)
+
+
+@app.on_callback_query(filters.regex(r"^split_start:(-?\d+):(-?\d+)$"))
+async def handle_split_start_cb(_, callback_query: CallbackQuery) -> None:
+    data = callback_query.data
+    _, chat_id_str, user_id_str = data.split(":")
+    chat_id = int(chat_id_str)
+    user_id = int(user_id_str)
+    
+    print(f"[DEBUG_SPLIT] handle_split_start_cb triggered. chat_id={chat_id}, user_id={user_id}", flush=True)
+    
+    req_user_id = callback_query.from_user.id if callback_query.from_user else callback_query.message.chat.id
+    if req_user_id != user_id:
+        await callback_query.answer("Unauthorized: You did not start this session.", show_alert=True)
+        return
+        
+    session_key = chat_id
+    if session_key not in _split_archive_sessions:
+        print(f"[DEBUG_SPLIT] session key {session_key} not in active sessions: {list(_split_archive_sessions.keys())}", flush=True)
+        await callback_query.answer("Session not found or already expired.", show_alert=True)
+        return
+        
+    session = _split_archive_sessions[session_key]
+    parts = session["parts"]
+    
+    print(f"[DEBUG_SPLIT] Starting extraction check. Uploaded parts: {list(parts.keys())}", flush=True)
+    
+    if not parts:
+        await callback_query.answer("No parts uploaded yet. Please send some split archive files first.", show_alert=True)
+        return
+        
+    sorted_parts = sorted(parts.keys())
+    missing_parts = []
+    for i in range(1, max(sorted_parts) + 1):
+        if i not in parts:
+            missing_parts.append(i)
+            
+    if missing_parts:
+        missing_str = ", ".join(map(str, missing_parts))
+        print(f"[DEBUG_SPLIT] Missing parts detected: {missing_parts}", flush=True)
+        await callback_query.answer(f"Missing parts: {missing_str}. Please upload them before starting.", show_alert=True)
+        return
+        
+    _split_archive_sessions.pop(session_key)
+    if session.get("timeout_task"):
+        session["timeout_task"].cancel()
+        
+    await callback_query.answer("Starting extraction job...")
+    asyncio.create_task(run_split_archive_download_and_extract(session, callback_query.message))
 
 
 @app.on_callback_query(filters.regex(r"^archive_(only|ext):(\d+):(.+)$"))

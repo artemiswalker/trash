@@ -334,7 +334,8 @@ class QueueManager:
             _archive_events,
             _archive_choices,
             _extracted_archives,
-            _extracted_file_names
+            _extracted_file_names,
+            get_split_archive_info
         )
 
         job = job_state.job
@@ -454,6 +455,17 @@ class QueueManager:
                     f_rel = str(f.relative_to(dest_dir))
 
                 is_archive = f.suffix.lower() in ARCHIVE_EXT
+                f_split = get_split_archive_info(f.name)
+                if not is_archive and f_split:
+                    if f_split["part"] == 1:
+                        base_ext = f".{f_split.get('ext')}" if f_split.get("ext") else None
+                        if not base_ext or base_ext.lower() in ARCHIVE_EXT:
+                            is_archive = True
+
+                if f_split and f_split["part"] > 1:
+                    if job.url.startswith("unzip:"):
+                        continue
+
                 if is_archive:
                     archive_prompt_msg_id = None
                     if job.id not in _archive_ids:
@@ -559,6 +571,19 @@ class QueueManager:
                                     except Exception:
                                         pass
                                     job_state.uploaded_filenames.add(f_rel)
+
+                                    if f_split and f_split["part"] == 1:
+                                        for sibling in dest_dir.iterdir():
+                                             if sibling.is_file() and f_split["pattern"].match(sibling.name):
+                                                 try:
+                                                     sibling.unlink(missing_ok=True)
+                                                 except Exception:
+                                                     pass
+                                                 try:
+                                                     sib_rel = str(sibling.relative_to(dest_dir))
+                                                     job_state.uploaded_filenames.add(sib_rel)
+                                                 except Exception:
+                                                     pass
 
                                 if archive_prompt_msg_id:
                                     try:
@@ -702,12 +727,34 @@ class QueueManager:
                         except Exception:
                             pass
 
-                if job.url.startswith("unzip:") and f.suffix.lower() in ARCHIVE_EXT:
+                is_file_archive = f.suffix.lower() in ARCHIVE_EXT
+                if not is_file_archive:
+                    f_split = get_split_archive_info(f.name)
+                    if f_split:
+                        base_ext = f".{f_split.get('ext')}" if f_split.get("ext") else None
+                        if not base_ext or base_ext.lower() in ARCHIVE_EXT:
+                            is_file_archive = True
+
+                if job.url.startswith("unzip:") and is_file_archive:
                     try:
                         f.unlink(missing_ok=True)
                     except Exception:
                         pass
                     job_state.uploaded_filenames.add(f_rel)
+
+                    f_split = get_split_archive_info(f.name)
+                    if f_split and f_split["part"] == 1:
+                        for sibling in dest_dir.iterdir():
+                            if sibling.is_file() and f_split["pattern"].match(sibling.name):
+                                try:
+                                    sibling.unlink(missing_ok=True)
+                                except Exception:
+                                    pass
+                                try:
+                                    sib_rel = str(sibling.relative_to(dest_dir))
+                                    job_state.uploaded_filenames.add(sib_rel)
+                                except Exception:
+                                    pass
                     continue
 
                 is_incompatible = f.suffix.lower() in CONVERSION_EXT

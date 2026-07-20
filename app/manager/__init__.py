@@ -31,7 +31,8 @@ from .archive import (
     _extracted_archives,
     _extracted_file_names,
     ARCHIVE_EXT,
-    ArchivePasswordRequired
+    ArchivePasswordRequired,
+    get_split_archive_info
 )
 
 __all__ = [
@@ -68,5 +69,6 @@ __all__ = [
     "_extracted_archives",
     "_extracted_file_names",
     "ARCHIVE_EXT",
-    "ArchivePasswordRequired"
+    "ArchivePasswordRequired",
+    "get_split_archive_info"
 ]
