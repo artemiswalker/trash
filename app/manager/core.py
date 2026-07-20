@@ -293,6 +293,7 @@ class QueueManager:
                     job_state.torrent_peers = connections
                     if name:
                         job_state.torrent_name = name
+                    job_state.trigger_event.set()
 
                 from ..downloader import download_torrent_async
                 result = await download_torrent_async(

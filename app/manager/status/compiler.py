@@ -4,6 +4,15 @@ from typing import Optional
 
 from .messaging import format_size, make_progress_bar
 
+def make_marquee_bar(width: int = 10) -> str:
+    import time
+    pos = int(time.time() * 2) % (width * 2 - 2)
+    if pos >= width:
+        pos = (width * 2 - 2) - pos
+    bar = ["░"] * width
+    bar[pos] = "█"
+    return "".join(bar)
+
 def format_url_display(url_json: str) -> str:
     try:
         urls = json.loads(url_json)
@@ -252,21 +261,29 @@ def compile_job_status_text(job, job_state) -> str:
     if not job_state.downloader_done.is_set():
         dl_speed_str = format_size(job_state.download_speed)
         dl_bytes_str = format_size(job_state.total_downloaded_bytes)
-        bar = make_progress_bar(job_state.download_pct)
         
-        text += (
-            f"**Downloader Metrics**\n"
-            f"| Progress: `{job_state.download_pct:.1f}%`\n"
-            f"| `[{bar}]`\n"
-            f"| Downloaded: `{dl_bytes_str}`\n"
-            f"| Speed: `{dl_speed_str}/s`\n"
-        )
+        text += "**Downloader Metrics**\n"
         if is_torrent:
+            bar = make_progress_bar(job_state.download_pct)
             seeders = getattr(job_state, "torrent_seeders", 0)
             peers = getattr(job_state, "torrent_peers", 0)
-            text += f"| Peers: `Seeders: {seeders} | Leechers/Peers: {peers}`\n"
-        elif job_state.current_download_file:
-            text += f"| Current File: `{job_state.current_download_file}`\n"
+            text += (
+                f"| Progress: `{job_state.download_pct:.1f}%`\n"
+                f"| `[{bar}]`\n"
+                f"| Downloaded: `{dl_bytes_str}`\n"
+                f"| Speed: `{dl_speed_str}/s`\n"
+                f"| Peers: `Seeders: {seeders} | Leechers/Peers: {peers}`\n"
+            )
+        else:
+            marquee = make_marquee_bar()
+            text += (
+                f"| Files Downloaded: `{job_state.download_count}`\n"
+                f"| `[{marquee}]`\n"
+                f"| Downloaded: `{dl_bytes_str}`\n"
+                f"| Speed: `{dl_speed_str}/s`\n"
+            )
+            if job_state.current_download_file:
+                text += f"| Current File: `{job_state.current_download_file}`\n"
     elif getattr(job_state, "is_converting", False):
         conv_file = getattr(job_state, "conversion_file", "media file")
         text += (

@@ -143,9 +143,26 @@ async def run_with_progress(
                 nonlocal count
                 assert proc.stdout is not None
                 async for line in proc.stdout:
+                    text = line.decode(errors="replace").strip()
+                    if not text:
+                        continue
+
                     count += 1
+                    filename = None
+                    parts = text.split()
+                    if parts:
+                        last_part = parts[-1].strip("'\"")
+                        if "/" in last_part or "\\" in last_part or "." in last_part:
+                            try:
+                                filename = Path(last_part).name
+                            except Exception:
+                                pass
+
                     if on_progress:
-                        on_progress(total_download_count + count)
+                        try:
+                            on_progress(total_download_count + count, filename)
+                        except TypeError:
+                            on_progress(total_download_count + count)
 
             async def pump_stderr():
                 assert proc.stderr is not None
