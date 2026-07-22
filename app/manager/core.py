@@ -269,8 +269,8 @@ class QueueManager:
                 job_state.msg_id = status_msg.id
                 job_state.last_edited_text = status_text
                 await self.store.set_status_message(job.id, status_msg.id)
-                if await safe_pin(self.client, chat_id, status_msg.id):
-                    job_state.is_pinned = True
+                await safe_pin(self.client, chat_id, status_msg.id)
+                job_state.is_pinned = True
 
             job_state.trigger_event.set()
 
@@ -302,14 +302,14 @@ class QueueManager:
                                 job_state.msg_id = init_m.id
                                 job_state.last_edited_text = status_text
                                 await self.store.set_status_message(job.id, init_m.id)
-                                if await safe_pin(self.client, chat_id, init_m.id):
-                                    job_state.is_pinned = True
+                                await safe_pin(self.client, chat_id, init_m.id)
+                                job_state.is_pinned = True
                         elif status_text != job_state.last_edited_text:
                             if await safe_edit(self.client, chat_id, job_state.msg_id, status_text, reply_markup=keyboard):
                                 job_state.last_edited_text = status_text
                                 if not job_state.is_pinned:
-                                    if await safe_pin(self.client, chat_id, job_state.msg_id):
-                                        job_state.is_pinned = True
+                                    await safe_pin(self.client, chat_id, job_state.msg_id)
+                                    job_state.is_pinned = True
                     except asyncio.TimeoutError:
                         try:
                             db_job = await self.store.get_job(job.id)
@@ -588,8 +588,8 @@ class QueueManager:
                             if await safe_edit(self.client, chat_id, job_state.msg_id, status_text, reply_markup=keyboard):
                                 job_state.last_edited_text = status_text
                                 if not job_state.is_pinned:
-                                    if await safe_pin(self.client, chat_id, job_state.msg_id):
-                                        job_state.is_pinned = True
+                                    await safe_pin(self.client, chat_id, job_state.msg_id)
+                                    job_state.is_pinned = True
                 except Exception:
 
                     pass

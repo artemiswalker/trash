@@ -6,6 +6,8 @@ from typing import Optional
 from pyrogram import Client
 from pyrogram.types import LinkPreviewOptions, Message
 
+from ...rate_limiter import telegram_limiter
+
 log = logging.getLogger(__name__)
 
 
@@ -26,9 +28,11 @@ def make_progress_bar(pct: float) -> str:
 async def safe_send(client: Client, chat_id: int, text: str, **kwargs) -> Message | None:
     from pyrogram.errors import FloodWait
     for _ in range(3):
+        await telegram_limiter.acquire(chat_id)
         try:
             return await client.send_message(chat_id, text, **kwargs)
         except FloodWait as e:
+            telegram_limiter.notify_floodwait(e.value, chat_id)
             log.warning("Telegram FloodWait: waiting %s seconds on send", e.value)
             await asyncio.sleep(e.value + 1)
         except Exception as e:
@@ -39,6 +43,7 @@ async def safe_send(client: Client, chat_id: int, text: str, **kwargs) -> Messag
 
 async def safe_edit(client: Client, chat_id: int, message_id: int, text: str, reply_markup=None) -> bool:
     from pyrogram.errors import FloodWait, MessageNotModified
+    await telegram_limiter.acquire(chat_id)
     try:
         await client.edit_message_text(
             chat_id,
@@ -51,6 +56,7 @@ async def safe_edit(client: Client, chat_id: int, message_id: int, text: str, re
     except MessageNotModified:
         return True
     except FloodWait as e:
+        telegram_limiter.notify_floodwait(e.value, chat_id)
         log.warning("Telegram FloodWait: waiting %s seconds on status edit", e.value)
         await asyncio.sleep(e.value + 1)
         return False
@@ -61,10 +67,12 @@ async def safe_edit(client: Client, chat_id: int, message_id: int, text: str, re
 
 async def safe_delete(client: Client, chat_id: int, message_id: int) -> bool:
     from pyrogram.errors import FloodWait
+    await telegram_limiter.acquire(chat_id)
     try:
         await client.delete_messages(chat_id, message_id)
         return True
     except FloodWait as e:
+        telegram_limiter.notify_floodwait(e.value, chat_id)
         log.warning("Telegram FloodWait: waiting %s seconds on message delete", e.value)
         await asyncio.sleep(e.value + 1)
         return False
@@ -75,10 +83,12 @@ async def safe_delete(client: Client, chat_id: int, message_id: int) -> bool:
 
 async def safe_pin(client: Client, chat_id: int, message_id: int, disable_notification: bool = True) -> bool:
     from pyrogram.errors import FloodWait
+    await telegram_limiter.acquire(chat_id)
     try:
         await client.pin_chat_message(chat_id, message_id, disable_notification=disable_notification, both_sides=True)
         return True
     except FloodWait as e:
+        telegram_limiter.notify_floodwait(e.value, chat_id)
         log.warning("Telegram FloodWait: waiting %s seconds on pin_chat_message", e.value)
         await asyncio.sleep(e.value + 1)
         return False
