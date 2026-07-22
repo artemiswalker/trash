@@ -20,6 +20,7 @@ from ..db import Job, JobStatus, JobStore
 from .state import JobState
 from .status import (
     safe_edit,
+    compile_queued_status_text,
     compile_job_status_text,
     compile_archive_prompt_text,
     compile_extraction_status_text,
