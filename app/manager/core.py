@@ -245,20 +245,16 @@ class QueueManager:
             await self.store.update_progress(job.id, status=JobStatus.DOWNLOADING)
 
             if not job_state.msg_id:
-                if is_torrent:
-                    initial_text = "Starting torrent download..."
-                elif is_gdrive:
-                    initial_text = f"Downloading from Google Drive:\n{cleaned_url}"
-                else:
-                    initial_text = f"Downloading:\n{cleaned_url}\n(large files or magnet links take a while)"
-                job_state.initial_download_msg = await safe_send(
+                initial_text = compile_queued_status_text(job.id, job.url, "")
+                init_msg = await safe_send(
                     self.client,
                     chat_id,
                     initial_text,
                     link_preview_options=LinkPreviewOptions(is_disabled=True)
                 )
-                if job_state.initial_download_msg:
-                    job_state.msg_id = job_state.initial_download_msg.id
+                if init_msg:
+                    job_state.msg_id = init_msg.id
+                    await self.store.set_status_message(job.id, init_msg.id)
 
             job_state.trigger_event.set()
 
@@ -274,30 +270,27 @@ class QueueManager:
                         if not db_job or db_job.status == JobStatus.CANCELLED:
                             break
 
-                        target_msg_id = job_state.msg_id or (job_state.initial_download_msg.id if job_state.initial_download_msg else None)
-                        if target_msg_id:
+                        if job_state.msg_id:
                             status_text = compile_job_status_text(db_job, job_state)
                             if status_text != job_state.last_edited_text:
                                 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
                                 keyboard = InlineKeyboardMarkup([
                                     [InlineKeyboardButton("Cancel", callback_data=f"cancel_job:{job.id}")]
                                 ])
-                                if await safe_edit(self.client, chat_id, target_msg_id, status_text, reply_markup=keyboard):
+                                if await safe_edit(self.client, chat_id, job_state.msg_id, status_text, reply_markup=keyboard):
                                     job_state.last_edited_text = status_text
                     except asyncio.TimeoutError:
                         try:
                             db_job = await self.store.get_job(job.id)
-                            if db_job and db_job.status != JobStatus.CANCELLED:
-                                target_msg_id = job_state.msg_id or (job_state.initial_download_msg.id if job_state.initial_download_msg else None)
-                                if target_msg_id:
-                                    status_text = compile_job_status_text(db_job, job_state)
-                                    if status_text != job_state.last_edited_text:
-                                        from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-                                        keyboard = InlineKeyboardMarkup([
-                                            [InlineKeyboardButton("Cancel", callback_data=f"cancel_job:{job.id}")]
-                                        ])
-                                        if await safe_edit(self.client, chat_id, target_msg_id, status_text, reply_markup=keyboard):
-                                            job_state.last_edited_text = status_text
+                            if db_job and db_job.status != JobStatus.CANCELLED and job_state.msg_id:
+                                status_text = compile_job_status_text(db_job, job_state)
+                                if status_text != job_state.last_edited_text:
+                                    from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+                                    keyboard = InlineKeyboardMarkup([
+                                        [InlineKeyboardButton("Cancel", callback_data=f"cancel_job:{job.id}")]
+                                    ])
+                                    if await safe_edit(self.client, chat_id, job_state.msg_id, status_text, reply_markup=keyboard):
+                                        job_state.last_edited_text = status_text
                         except Exception:
                             pass
                     except Exception:
@@ -523,13 +516,8 @@ class QueueManager:
                             ])
                             if await safe_edit(self.client, chat_id, job_state.msg_id, status_text, reply_markup=keyboard):
                                 job_state.last_edited_text = status_text
-                                if getattr(job_state, "initial_download_msg", None):
-                                    try:
-                                        await self.client.delete_messages(chat_id, job_state.initial_download_msg.id)
-                                        job_state.initial_download_msg = None
-                                    except Exception:
-                                        pass
                 except Exception:
+
                     pass
 
         async def perform_uploads() -> None:
