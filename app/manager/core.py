@@ -383,7 +383,13 @@ class QueueManager:
                     job_state.archive_format = archive_fmt
                     job_state.trigger_event.set()
                     try:
-                        await archive_all_folders_in_dir(dest_dir, archive_format=archive_fmt)
+                        _archive_paths, _pd_links = await archive_all_folders_in_dir(
+                            dest_dir,
+                            archive_format=archive_fmt,
+                            mirror_pixeldrain=mirror_pixeldrain,
+                        )
+                        if _pd_links:
+                            job_state.pixeldrain_links.extend(_pd_links)
                     finally:
                         job_state.is_archiving = False
                         job_state.trigger_event.set()
