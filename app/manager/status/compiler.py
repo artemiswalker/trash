@@ -232,17 +232,6 @@ def compile_extraction_success_status_text(job_id: str, filename: str) -> str:
     )
 
 
-def compile_job_status_text(job, job_state) -> str:
-    cleaned_url = job.url
-    if job.url.startswith("[") and job.url.endswith("]"):
-        try:
-            import json
-            parsed = json.loads(job.url)
-            if parsed and isinstance(parsed, list):
-                cleaned_url = parsed[0]
-        except Exception:
-            pass
-
 def format_user_args(args_raw: Optional[str]) -> str:
     if not args_raw:
         return ""

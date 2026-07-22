@@ -393,6 +393,23 @@ class QueueManager:
                     finally:
                         job_state.is_archiving = False
                         job_state.trigger_event.set()
+                elif mirror_pixeldrain:
+                    from ..uploader import upload_to_pixeldrain
+                    domain = settings.pixeldrain_domain or "pixeldrain.com"
+                    log.info("Mirroring downloaded GDrive files to Pixeldrain for job #%s", job.id)
+                    for f in sorted(dest_dir.rglob("*")):
+                        if not f.is_file():
+                            continue
+                        try:
+                            res, _ = await upload_to_pixeldrain(
+                                f, api_key=settings.pixeldrain_api_key, domain=domain
+                            )
+                            if isinstance(res, dict) and res.get("id"):
+                                pd_url = f"https://{domain}/u/{res['id']}"
+                                log.info("Successfully mirrored raw file '%s' to Pixeldrain: %s", f.name, pd_url)
+                                job_state.pixeldrain_links.append((f.name, pd_url))
+                        except Exception as pe:
+                            log.exception("Failed to mirror raw file '%s' to Pixeldrain: %s", f.name, pe)
 
 
                 final_files = [p for p in dest_dir.rglob("*") if p.is_file()]

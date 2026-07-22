@@ -1572,9 +1572,6 @@ async def gd2tg_handler(_, message: Message) -> None:
         elif p_lower in ("pd", "pixeldrain"):
             mirror_pixeldrain = True
 
-    if not archive_fmt and mirror_pixeldrain:
-        archive_fmt = "zip"
-
     try:
         from .gdrive import get_id_from_url
         get_id_from_url(link)

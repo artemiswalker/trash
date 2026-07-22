@@ -102,10 +102,11 @@ async def archive_folder_async(
     if upload_unsplit_to_pd:
         try:
             from ..uploader import upload_to_pixeldrain
+            domain = settings.pixeldrain_domain or "pixeldrain.com"
             log.info("Mirroring original unsplit archive '%s' (%.2f GB) to Pixeldrain...", output_archive.name, archive_size / (1024**3))
-            res, pd_logs = await upload_to_pixeldrain(output_archive, api_key=settings.pixeldrain_api_key)
+            res, pd_logs = await upload_to_pixeldrain(output_archive, api_key=settings.pixeldrain_api_key, domain=domain)
             if isinstance(res, dict) and res.get("id"):
-                pd_url = f"https://pixeldrain.com/u/{res['id']}"
+                pd_url = f"https://{domain}/u/{res['id']}"
                 log.info("Successfully mirrored '%s' to Pixeldrain: %s", output_archive.name, pd_url)
                 pd_links.append((output_archive.name, pd_url))
             else:
@@ -155,11 +156,12 @@ async def archive_folder_async(
             len(telegram_archives)
         )
         from ..uploader import upload_to_pixeldrain
+        domain = settings.pixeldrain_domain or "pixeldrain.com"
         for part_path in telegram_archives:
             try:
-                res, pd_logs = await upload_to_pixeldrain(part_path, api_key=settings.pixeldrain_api_key)
+                res, pd_logs = await upload_to_pixeldrain(part_path, api_key=settings.pixeldrain_api_key, domain=domain)
                 if isinstance(res, dict) and res.get("id"):
-                    pd_url = f"https://pixeldrain.com/u/{res['id']}"
+                    pd_url = f"https://{domain}/u/{res['id']}"
                     log.info("Successfully mirrored split volume '%s' to Pixeldrain: %s", part_path.name, pd_url)
                     pd_links.append((part_path.name, pd_url))
                 else:
