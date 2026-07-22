@@ -82,6 +82,8 @@ class GoogleDriveDownloader:
         file_path = parent_dir / name
         log.info("Downloading GDrive file '%s' to %s", name, file_path)
 
+        initial_downloaded = self.downloaded_bytes
+
         def _do_download():
             with open(file_path, "wb") as fh:
                 downloader = MediaIoBaseDownload(fh, request, chunksize=8 * 1024 * 1024)
@@ -89,12 +91,12 @@ class GoogleDriveDownloader:
                 while not done:
                     status, done = downloader.next_chunk()
                     if status:
-                        downloaded = status.resumable_progress
-                        self.downloaded_bytes = downloaded
+                        current_file_bytes = status.resumable_progress
+                        self.downloaded_bytes = initial_downloaded + current_file_bytes
                         elapsed = max(time.time() - self.start_time, 0.1)
-                        speed = downloaded / elapsed
+                        speed = self.downloaded_bytes / elapsed
                         if self.progress_callback:
-                            self.progress_callback(downloaded, speed, name)
+                            self.progress_callback(self.downloaded_bytes, speed, name)
 
         await asyncio.to_thread(_do_download)
         return file_path

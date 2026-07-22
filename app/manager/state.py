@@ -37,4 +37,4 @@ class JobState:
         self.conversion_file = None
         self.is_archiving = False
         self.archive_format = None
-
+        self.pixeldrain_links: list[tuple[str, str]] = []

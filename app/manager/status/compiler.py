@@ -1,6 +1,12 @@
+from __future__ import annotations
+
 import json
 from pathlib import Path
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ...db import Job
+    from ..state import JobState
 
 from .messaging import format_size, make_progress_bar
 
@@ -96,14 +102,16 @@ def compile_queued_status_text(job_id: str, url: str, args_display: str) -> str:
         return (
             f"**Queued (job #{job_id})**\n"
             f"------------------------------------\n"
-            f"- **Type**: `GDrive Download`\n"
+            f"- **Type**: `Google Drive Download`\n"
+            f"- **Tool**: `Google Drive API`\n"
             f"- **Link**: `{gdrive_disp}`{args_display}"
         )
 
     return (
         f"**Queued (job #{job_id})**\n"
         f"------------------------------------\n"
-        f"- **URL**: {format_url_display(url)}{args_display}"
+        f"- **URL**: {format_url_display(url)}{args_display}\n"
+        f"- **Tool**: `gallery-dl`"
     )
 
 
@@ -235,12 +243,72 @@ def compile_job_status_text(job, job_state) -> str:
         except Exception:
             pass
 
+def format_user_args(args_raw: Optional[str]) -> str:
+    if not args_raw:
+        return ""
+    try:
+        data = json.loads(args_raw)
+        if isinstance(data, list):
+            user_flags = [str(item) for item in data if item]
+            return " ".join(user_flags)
+        elif isinstance(data, dict):
+            user_flags = []
+            fmt = data.get("archive_format")
+            if fmt:
+                user_flags.append(f"-{fmt}")
+            if data.get("mirror_pixeldrain"):
+                user_flags.append("-pd")
+            extra = data.get("custom_args") or data.get("extra_args")
+            if isinstance(extra, list):
+                user_flags.extend([str(x) for x in extra])
+            elif isinstance(extra, str) and extra:
+                user_flags.append(extra)
+            return " ".join(user_flags)
+    except Exception:
+        return str(args_raw).strip()
+    return ""
+
+
+def compile_job_status_text(job: Job, job_state: JobState) -> str:
+    cleaned_url = job.url
+    if job.url.startswith("[") and job.url.endswith("]"):
+        try:
+            parsed = json.loads(job.url)
+            if parsed and isinstance(parsed, list):
+                cleaned_url = parsed[0]
+        except Exception:
+            pass
+
     is_torrent = (
         cleaned_url.startswith("magnet:") or
         cleaned_url.startswith("torrent:") or
         cleaned_url.endswith(".torrent") or
         "magnet:?xt=" in cleaned_url
     )
+
+    is_gdrive = (
+        cleaned_url.startswith("gdrive:") or
+        cleaned_url.startswith("gd2tg:") or
+        "drive.google.com" in cleaned_url or
+        "docs.google.com" in cleaned_url
+    )
+
+    # Determine active tool dynamically based on current phase
+    if getattr(job_state, "is_archiving", False):
+        import shutil
+        active_tool = "7z" if shutil.which("7z") else ("zip" if shutil.which("zip") else "zipfile")
+    elif getattr(job_state, "is_converting", False):
+        active_tool = "FFmpeg"
+    elif job.status == "uploading" or job_state.sent > 0 or job_state.current_upload_file:
+        active_tool = "Pyrogram (Telegram Uploader)"
+    elif is_gdrive:
+        active_tool = "Google Drive API"
+    elif is_torrent:
+        active_tool = "aria2c"
+    elif cleaned_url.startswith("unzip:"):
+        active_tool = "Pyrogram Downloader"
+    else:
+        active_tool = "gallery-dl"
 
     split_str = "Enabled" if job.split_large_files else "Disabled"
     
@@ -262,36 +330,25 @@ def compile_job_status_text(job, job_state) -> str:
         else:
             magnet_disp = cleaned_url[:50] + "..." if len(cleaned_url) > 50 else cleaned_url
             text += f"**Magnet Link:** `{magnet_disp}`\n"
-        text += f"**Tool:** `aria2c`\n"
     else:
         text += f"**URL:** {format_url_display(job.url)}\n"
-        parsed_args = []
-        if job.args:
-            try:
-                parsed_args = json.loads(job.args)
-            except Exception:
-                pass
-        if parsed_args:
-            text += f"**Args:** `{' '.join(parsed_args)}`\n"
+        user_args_str = format_user_args(job.args)
+        if user_args_str:
+            text += f"**Args:** `{user_args_str}`\n"
             
     text += f"**Split > 2GB:** `{split_str}`\n"
     text += f"------------------------------------\n"
 
-    is_gdrive = (
-        cleaned_url.startswith("gdrive:") or
-        cleaned_url.startswith("gd2tg:") or
-        "drive.google.com" in cleaned_url or
-        "docs.google.com" in cleaned_url
-    )
-
     if not job_state.downloader_done.is_set():
         dl_speed_str = format_size(job_state.download_speed)
         dl_bytes_str = format_size(job_state.total_downloaded_bytes)
+        dl_tool = "Google Drive API" if is_gdrive else ("aria2c" if is_torrent else ("Pyrogram Downloader" if cleaned_url.startswith("unzip:") else "gallery-dl"))
         
         if is_gdrive:
             marquee = make_marquee_bar()
             text += (
                 f"**GDrive Downloader Metrics**\n"
+                f"| Tool: `{dl_tool}`\n"
                 f"| `[{marquee}]`\n"
                 f"| Downloaded: `{dl_bytes_str}`\n"
                 f"| Speed: `{dl_speed_str}/s`\n"
@@ -304,6 +361,7 @@ def compile_job_status_text(job, job_state) -> str:
             peers = getattr(job_state, "torrent_peers", 0)
             text += (
                 f"**Downloader Metrics**\n"
+                f"| Tool: `{dl_tool}`\n"
                 f"| Progress: `{job_state.download_pct:.1f}%`\n"
                 f"| `[{bar}]`\n"
                 f"| Downloaded: `{dl_bytes_str}`\n"
@@ -314,6 +372,7 @@ def compile_job_status_text(job, job_state) -> str:
             marquee = make_marquee_bar()
             text += (
                 f"**Downloader Metrics**\n"
+                f"| Tool: `{dl_tool}`\n"
                 f"| Files Downloaded: `{job_state.download_count}`\n"
                 f"| `[{marquee}]`\n"
                 f"| Downloaded: `{dl_bytes_str}`\n"
@@ -322,9 +381,12 @@ def compile_job_status_text(job, job_state) -> str:
             if job_state.current_download_file:
                 text += f"| Current File: `{job_state.current_download_file}`\n"
     elif getattr(job_state, "is_archiving", False):
+        import shutil
+        archiver_tool = "7z" if shutil.which("7z") else ("zip" if shutil.which("zip") else "zipfile")
         fmt = getattr(job_state, "archive_format", "ZIP") or "ZIP"
         text += (
             f"**Folder Compression & Archiving**\n"
+            f"| Tool: `{archiver_tool}`\n"
             f"| Format: `{fmt.upper()}`\n"
             f"| Status: `Compressing downloaded folders...`\n"
         )
@@ -332,6 +394,7 @@ def compile_job_status_text(job, job_state) -> str:
         conv_file = getattr(job_state, "conversion_file", "media file")
         text += (
             f"**Media Conversion**\n"
+            f"| Tool: `FFmpeg`\n"
             f"| Converting File: `{conv_file}`\n"
             f"| *(Converting format to standard MP4 container)*\n"
         )
@@ -339,6 +402,7 @@ def compile_job_status_text(job, job_state) -> str:
         ul_speed_str = format_size(job_state.upload_speed)
         text += (
             f"**Uploader Metrics**\n"
+            f"| Tool: `Pyrogram (Telegram Uploader)`\n"
             f"| Files Sent: `{job_state.sent} / {job.total_files if job.total_files > 0 else 'Calculating'}`\n"
             f"| Files Skipped: `{len(job_state.skipped)}`\n"
         )

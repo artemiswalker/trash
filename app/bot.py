@@ -173,7 +173,7 @@ async def start_cmd(_, message: Message) -> None:
     text = (
         "Send me links to download media files (e.g., videos, photo albums) and upload them to Telegram.\n\n"
         "**Usage:**\n"
-        "• **Google Drive**: `/gd2tg <gdrive_link> [-zip|-7z]` (downloads GDrive link & archives folders individually).\n"
+        "• **Google Drive**: `/gd2tg <gdrive_link> [-zip|-7z] [-pd]` (downloads GDrive link & archives folders, add `-pd` to mirror unsplit archives to Pixeldrain).\n"
         "• **Single URL**: `https://example.com/album1`\n"
         "• **Shorthand options**: `https://example.com/album1 pages=1-16`\n"
         "• **Multiple URLs**: `https://example.com/album1 https://example.com/album2`\n"
@@ -1447,9 +1447,17 @@ async def requeue_incomplete_jobs() -> None:
 _pending_oauth_flows: dict[int, tuple[Any, int]] = {}
 
 
+def get_message_user_id(message: Message) -> int:
+    if message.from_user:
+        return message.from_user.id
+    if message.sender_chat:
+        return message.sender_chat.id
+    return message.chat.id
+
+
 @app.on_message(filters.command(["gd2tg"]))
 async def gd2tg_handler(_, message: Message) -> None:
-    user_id = message.from_user.id if message.from_user else message.chat.id
+    user_id = get_message_user_id(message)
     user_auth_dir = settings.auth_dir / str(user_id)
 
     # Check if user replied to any .json file
@@ -1546,18 +1554,26 @@ async def gd2tg_handler(_, message: Message) -> None:
     parts = text.split()
     if len(parts) < 2:
         await message.reply_text(
-            "**Usage:** `/gd2tg <gdrive_link> [-zip|-7z]`\n"
-            "Downloads a Google Drive link, archives each folder individually, and uploads to Telegram.",
+            "**Usage:** `/gd2tg <gdrive_link> [-zip|-7z] [-pd]`\n"
+            "Downloads a Google Drive link, archives each folder individually, and uploads to Telegram.\n"
+            "• Use `-pd` flag to mirror original unsplit archives to Pixeldrain as well.",
             link_preview_options=LinkPreviewOptions(is_disabled=True)
         )
         return
 
     link = parts[1]
-    archive_fmt = "zip"
-    if len(parts) > 2:
-        flag = parts[2].lower().lstrip("-")
-        if flag in ("7z", "zip"):
-            archive_fmt = flag
+    archive_fmt = None
+    mirror_pixeldrain = False
+
+    for part in parts[2:]:
+        p_lower = part.lower().lstrip("-")
+        if p_lower in ("zip", "7z"):
+            archive_fmt = p_lower
+        elif p_lower in ("pd", "pixeldrain"):
+            mirror_pixeldrain = True
+
+    if not archive_fmt and mirror_pixeldrain:
+        archive_fmt = "zip"
 
     try:
         from .gdrive import get_id_from_url
@@ -1569,23 +1585,29 @@ async def gd2tg_handler(_, message: Message) -> None:
         )
         return
 
-    args_json = json.dumps({"gdrive": True, "archive_format": archive_fmt})
+    args_json = json.dumps({
+        "gdrive": True,
+        "archive_format": archive_fmt,
+        "mirror_pixeldrain": mirror_pixeldrain,
+        "user_id": user_id
+    })
     urls_json = json.dumps([f"gd2tg:{link}"])
 
     job = await store.create_job(message.chat.id, urls_json, split_large_files=1, args=args_json)
     await queue_manager.add_job(job.id)
 
-    status_msg = await message.reply_text(
-        f"**GDrive to Telegram Job #{job.id} Queued**\n"
-        f"- **Link**: `{link}`\n"
-        f"- **Archive Format**: `{archive_fmt.upper()}`",
-        link_preview_options=LinkPreviewOptions(is_disabled=True)
-    )
+    pd_info = " + Pixeldrain Mirror" if mirror_pixeldrain else ""
+    fmt_info = archive_fmt.upper() if archive_fmt else "RAW"
+    args_disp = f"\n- **Archive Format**: `{fmt_info}`{pd_info}"
+    from .manager.status import compile_queued_status_text
+    queued_text = compile_queued_status_text(job.id, f"gd2tg:{link}", args_disp)
+
+    status_msg = await message.reply_text(queued_text)
     await store.set_status_message(job.id, status_msg.id)
 
 
-
 async def _startup() -> None:
+
     await store.open()
     await cleanup_orphaned_directories()
     await queue_manager.start(app, store)

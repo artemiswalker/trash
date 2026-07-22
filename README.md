@@ -23,7 +23,7 @@ A minimal Telegram bot that downloads media albums, videos, torrents, and Google
 
 ### Commands
 - `/start` or `/help` — Display welcome message and command instructions.
-- `/gd2tg <gdrive_link> [-zip|-7z]` — Download a Google Drive link, archive folders individually, and upload to Telegram.
+- `/gd2tg <gdrive_link> [-zip|-7z] [-pd]` — Download a Google Drive link, archive folders individually, and upload to Telegram. Use `-pd` to mirror the original unsplit archives to Pixeldrain.
 - `/gdl` — Process replied `.txt` links files.
 - `/tor` — Download magnet/torrent links or reply to a `.torrent` file.
 - `/unzip` — Reply to a compressed archive file to extract and upload its contents.
@@ -32,7 +32,7 @@ A minimal Telegram bot that downloads media albums, videos, torrents, and Google
 - `/cancel` — Instantly abort the active job or cancel queued jobs.
 
 ### Input Formats
-- **Google Drive**: `/gd2tg https://drive.google.com/drive/folders/... -zip` (or `-7z`)
+- **Google Drive**: `/gd2tg https://drive.google.com/drive/folders/... -zip -pd` (or `-7z`)
 - **Single URL**: `https://example.com/album1`
 - **With Shorthands**: `https://example.com/album1 pages=1-16`
 - **Multiple URLs**: `https://example.com/album1 https://example.com/album2`

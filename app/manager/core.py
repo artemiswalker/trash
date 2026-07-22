@@ -165,6 +165,8 @@ class QueueManager:
                     
                 dest_dir = (settings.downloads_dir / job.download_dir).resolve()
                 job_state = JobState(job, dest_dir)
+                if job.status_message_id:
+                    job_state.msg_id = job.status_message_id
                 self.jobs[job_id] = job_state
                 await self.upload_queue.put(job_id)
                 await self._process_download(job_state)
@@ -240,20 +242,68 @@ class QueueManager:
                 "docs.google.com" in cleaned_url
             )
 
-            if is_torrent:
-                initial_text = "Starting torrent download..."
-            elif is_gdrive:
-                initial_text = f"Downloading from Google Drive:\n{cleaned_url}"
-            else:
-                initial_text = f"Downloading:\n{cleaned_url}\n(large files or magnet links take a while)"
-
             await self.store.update_progress(job.id, status=JobStatus.DOWNLOADING)
-            job_state.initial_download_msg = await safe_send(
-                self.client,
-                chat_id,
-                initial_text,
-                link_preview_options=LinkPreviewOptions(is_disabled=True)
-            )
+
+            if not job_state.msg_id:
+                if is_torrent:
+                    initial_text = "Starting torrent download..."
+                elif is_gdrive:
+                    initial_text = f"Downloading from Google Drive:\n{cleaned_url}"
+                else:
+                    initial_text = f"Downloading:\n{cleaned_url}\n(large files or magnet links take a while)"
+                job_state.initial_download_msg = await safe_send(
+                    self.client,
+                    chat_id,
+                    initial_text,
+                    link_preview_options=LinkPreviewOptions(is_disabled=True)
+                )
+                if job_state.initial_download_msg:
+                    job_state.msg_id = job_state.initial_download_msg.id
+
+            job_state.trigger_event.set()
+
+            async def download_status_updater_loop() -> None:
+                while not job_state.downloader_done.is_set():
+                    try:
+                        await asyncio.wait_for(job_state.trigger_event.wait(), timeout=3.0)
+                        job_state.trigger_event.clear()
+                        if job_state.downloader_done.is_set():
+                            break
+
+                        db_job = await self.store.get_job(job.id)
+                        if not db_job or db_job.status == JobStatus.CANCELLED:
+                            break
+
+                        target_msg_id = job_state.msg_id or (job_state.initial_download_msg.id if job_state.initial_download_msg else None)
+                        if target_msg_id:
+                            status_text = compile_job_status_text(db_job, job_state)
+                            if status_text != job_state.last_edited_text:
+                                from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+                                keyboard = InlineKeyboardMarkup([
+                                    [InlineKeyboardButton("Cancel", callback_data=f"cancel_job:{job.id}")]
+                                ])
+                                if await safe_edit(self.client, chat_id, target_msg_id, status_text, reply_markup=keyboard):
+                                    job_state.last_edited_text = status_text
+                    except asyncio.TimeoutError:
+                        try:
+                            db_job = await self.store.get_job(job.id)
+                            if db_job and db_job.status != JobStatus.CANCELLED:
+                                target_msg_id = job_state.msg_id or (job_state.initial_download_msg.id if job_state.initial_download_msg else None)
+                                if target_msg_id:
+                                    status_text = compile_job_status_text(db_job, job_state)
+                                    if status_text != job_state.last_edited_text:
+                                        from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+                                        keyboard = InlineKeyboardMarkup([
+                                            [InlineKeyboardButton("Cancel", callback_data=f"cancel_job:{job.id}")]
+                                        ])
+                                        if await safe_edit(self.client, chat_id, target_msg_id, status_text, reply_markup=keyboard):
+                                            job_state.last_edited_text = status_text
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+
+            download_updater_task = asyncio.create_task(download_status_updater_loop())
 
             def reg(proc):
                 job_state.active_process = proc
@@ -312,18 +362,26 @@ class QueueManager:
                     job_state.current_download_file = filename
                     job_state.trigger_event.set()
 
-                downloader = GoogleDriveDownloader(user_id=chat_id, progress_callback=on_gdrive_progress)
-
-                await downloader.download_link(gdrive_link, dest_dir)
-
+                gdrive_user_id = None
                 archive_fmt = None
+                mirror_pixeldrain = False
                 if job.args:
                     try:
                         args_dict = json.loads(job.args)
                         if isinstance(args_dict, dict):
                             archive_fmt = args_dict.get("archive_format")
+                            mirror_pixeldrain = bool(args_dict.get("mirror_pixeldrain"))
+                            gdrive_user_id = args_dict.get("user_id")
                     except Exception:
                         pass
+
+                if not gdrive_user_id:
+                    gdrive_user_id = chat_id
+
+                downloader = GoogleDriveDownloader(user_id=gdrive_user_id, progress_callback=on_gdrive_progress)
+
+                await downloader.download_link(gdrive_link, dest_dir)
+
 
                 if archive_fmt:
                     log.info("Archiving downloaded GDrive folders in %s format for job #%s", archive_fmt, job.id)
@@ -391,6 +449,9 @@ class QueueManager:
         finally:
             job_state.downloader_done.set()
             job_state.trigger_event.set()
+            if 'download_updater_task' in locals() and download_updater_task:
+                download_updater_task.cancel()
+                await asyncio.gather(download_updater_task, return_exceptions=True)
             if monitor_task:
                 monitor_task.cancel()
                 await asyncio.gather(monitor_task, return_exceptions=True)
@@ -1360,8 +1421,13 @@ class QueueManager:
                 preview = "\n".join(f"- {n} ({info})" for n, info in job_state.skipped[:20])
                 more = f"\n…and {len(job_state.skipped) - 20} more" if len(job_state.skipped) > 20 else ""
                 summary += f"\nSkipped:\n{preview}{more}"
-                
+
+            if getattr(job_state, "pixeldrain_links", None):
+                link_lines = [f"• `{fname}`: {url}" for fname, url in job_state.pixeldrain_links]
+                summary += f"\n\n**Pixeldrain Mirror Links:**\n" + "\n".join(link_lines)
+
             await report(summary)
+
             shutil.rmtree(dest_dir, ignore_errors=True)
             shutil.rmtree(extract_dir, ignore_errors=True)
             
