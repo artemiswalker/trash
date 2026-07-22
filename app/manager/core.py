@@ -20,6 +20,8 @@ from ..db import Job, JobStatus, JobStore
 from .state import JobState
 from .status import (
     safe_edit,
+    safe_pin,
+    safe_delete,
     compile_queued_status_text,
     compile_job_status_text,
     compile_archive_prompt_text,
@@ -245,17 +247,30 @@ class QueueManager:
 
             await self.store.update_progress(job.id, status=JobStatus.DOWNLOADING)
 
-            if not job_state.msg_id:
-                initial_text = compile_queued_status_text(job.id, job.url, "")
-                init_msg = await safe_send(
-                    self.client,
-                    chat_id,
-                    initial_text,
-                    link_preview_options=LinkPreviewOptions(is_disabled=True)
-                )
-                if init_msg:
-                    job_state.msg_id = init_msg.id
-                    await self.store.set_status_message(job.id, init_msg.id)
+            queued_msg_id = job_state.msg_id or job.status_message_id
+            if queued_msg_id:
+                await safe_delete(self.client, chat_id, queued_msg_id)
+                job_state.msg_id = None
+
+            db_job = await self.store.get_job(job.id) or job
+            status_text = compile_job_status_text(db_job, job_state)
+            from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("Cancel", callback_data=f"cancel_job:{job.id}")]
+            ])
+            status_msg = await safe_send(
+                self.client,
+                chat_id,
+                status_text,
+                reply_markup=keyboard,
+                link_preview_options=LinkPreviewOptions(is_disabled=True)
+            )
+            if status_msg:
+                job_state.msg_id = status_msg.id
+                job_state.last_edited_text = status_text
+                await self.store.set_status_message(job.id, status_msg.id)
+                if await safe_pin(self.client, chat_id, status_msg.id):
+                    job_state.is_pinned = True
 
             job_state.trigger_event.set()
 
@@ -271,27 +286,59 @@ class QueueManager:
                         if not db_job or db_job.status == JobStatus.CANCELLED:
                             break
 
-                        if job_state.msg_id:
-                            status_text = compile_job_status_text(db_job, job_state)
-                            if status_text != job_state.last_edited_text:
-                                from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-                                keyboard = InlineKeyboardMarkup([
-                                    [InlineKeyboardButton("Cancel", callback_data=f"cancel_job:{job.id}")]
-                                ])
-                                if await safe_edit(self.client, chat_id, job_state.msg_id, status_text, reply_markup=keyboard):
-                                    job_state.last_edited_text = status_text
+                        status_text = compile_job_status_text(db_job, job_state)
+                        keyboard = InlineKeyboardMarkup([
+                            [InlineKeyboardButton("Cancel", callback_data=f"cancel_job:{job.id}")]
+                        ])
+                        if not job_state.msg_id:
+                            init_m = await safe_send(
+                                self.client,
+                                chat_id,
+                                status_text,
+                                reply_markup=keyboard,
+                                link_preview_options=LinkPreviewOptions(is_disabled=True)
+                            )
+                            if init_m:
+                                job_state.msg_id = init_m.id
+                                job_state.last_edited_text = status_text
+                                await self.store.set_status_message(job.id, init_m.id)
+                                if await safe_pin(self.client, chat_id, init_m.id):
+                                    job_state.is_pinned = True
+                        elif status_text != job_state.last_edited_text:
+                            if await safe_edit(self.client, chat_id, job_state.msg_id, status_text, reply_markup=keyboard):
+                                job_state.last_edited_text = status_text
+                                if not job_state.is_pinned:
+                                    if await safe_pin(self.client, chat_id, job_state.msg_id):
+                                        job_state.is_pinned = True
                     except asyncio.TimeoutError:
                         try:
                             db_job = await self.store.get_job(job.id)
-                            if db_job and db_job.status != JobStatus.CANCELLED and job_state.msg_id:
+                            if db_job and db_job.status != JobStatus.CANCELLED:
                                 status_text = compile_job_status_text(db_job, job_state)
-                                if status_text != job_state.last_edited_text:
-                                    from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-                                    keyboard = InlineKeyboardMarkup([
-                                        [InlineKeyboardButton("Cancel", callback_data=f"cancel_job:{job.id}")]
-                                    ])
+                                keyboard = InlineKeyboardMarkup([
+                                    [InlineKeyboardButton("Cancel", callback_data=f"cancel_job:{job.id}")]
+                                ])
+                                if not job_state.msg_id:
+                                    init_m = await safe_send(
+                                        self.client,
+                                        chat_id,
+                                        status_text,
+                                        reply_markup=keyboard,
+                                        link_preview_options=LinkPreviewOptions(is_disabled=True)
+                                    )
+                                    if init_m:
+                                        job_state.msg_id = init_m.id
+                                        job_state.last_edited_text = status_text
+                                        await self.store.set_status_message(job.id, init_m.id)
+                                        if await safe_pin(self.client, chat_id, init_m.id):
+                                            job_state.is_pinned = True
+                                elif status_text != job_state.last_edited_text:
                                     if await safe_edit(self.client, chat_id, job_state.msg_id, status_text, reply_markup=keyboard):
                                         job_state.last_edited_text = status_text
+                                        if not job_state.is_pinned:
+                                            if await safe_pin(self.client, chat_id, job_state.msg_id):
+                                                job_state.is_pinned = True
+
                         except Exception:
                             pass
                     except Exception:
@@ -540,6 +587,9 @@ class QueueManager:
                             ])
                             if await safe_edit(self.client, chat_id, job_state.msg_id, status_text, reply_markup=keyboard):
                                 job_state.last_edited_text = status_text
+                                if not job_state.is_pinned:
+                                    if await safe_pin(self.client, chat_id, job_state.msg_id):
+                                        job_state.is_pinned = True
                 except Exception:
 
                     pass

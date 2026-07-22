@@ -38,3 +38,4 @@ class JobState:
         self.is_archiving = False
         self.archive_format = None
         self.pixeldrain_links: list[tuple[str, str]] = []
+        self.is_pinned: bool = False

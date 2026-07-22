@@ -1,4 +1,4 @@
-from .messaging import format_size, make_progress_bar, safe_edit
+from .messaging import format_size, make_progress_bar, safe_send, safe_edit, safe_delete, safe_pin
 from .compiler import (
     format_url_display,
     compile_split_prompt_text,
@@ -22,7 +22,10 @@ from .compiler import (
 __all__ = [
     "format_size",
     "make_progress_bar",
+    "safe_send",
     "safe_edit",
+    "safe_delete",
+    "safe_pin",
     "format_url_display",
     "compile_split_prompt_text",
     "compile_queued_status_text",
