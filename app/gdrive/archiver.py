@@ -30,7 +30,8 @@ async def archive_folder_async(
     folder_path: Path,
     archive_format: str = "zip",
     max_part_size_mb: int = 1900,
-    mirror_pixeldrain: bool = False
+    mirror_pixeldrain: bool = False,
+    job_state = None
 ) -> tuple[list[Path], list[tuple[str, str]]]:
     """Compresses a folder into single or split .zip / .7z archives.
 
@@ -100,25 +101,8 @@ async def archive_folder_async(
     upload_unsplit_to_pd = mirror_pixeldrain and not is_split and archive_size <= pixeldrain_max_bytes
     upload_parts_to_pd = mirror_pixeldrain and is_split
 
-    # 1. Upload original unsplit archive to Pixeldrain if requested and size <= 10GB
-    if upload_unsplit_to_pd:
-        try:
-            from ..uploader import upload_to_pixeldrain
-            domain = settings.pixeldrain_domain or "pixeldrain.com"
-            log.info("Mirroring original unsplit archive '%s' (%.2f GB) to Pixeldrain...", output_archive.name, archive_size / (1024**3))
-            res, pd_logs = await upload_to_pixeldrain(output_archive, api_key=settings.pixeldrain_api_key, domain=domain)
-            if isinstance(res, dict) and res.get("id"):
-                pd_url = f"https://{domain}/u/{res['id']}"
-                log.info("Successfully mirrored '%s' to Pixeldrain: %s", output_archive.name, pd_url)
-                pd_links.append((output_archive.name, pd_url))
-            else:
-                log.warning("Pixeldrain upload response missing id for %s: %s", output_archive.name, res)
-        except Exception as pe:
-            log.exception("Failed to upload %s to Pixeldrain: %s", output_archive.name, pe)
-
-    # 2. Check if volume splitting is required for Telegram (> 1.95GB)
+    # 1. Check if volume splitting is required for Telegram (> 1.95GB)
     file_size = archive_size
-    limit_bytes = max_part_size_mb * 1024 * 1024
 
     telegram_archives: list[Path] = []
     if file_size > limit_bytes:
@@ -149,27 +133,50 @@ async def archive_folder_async(
     if not telegram_archives:
         telegram_archives = [output_archive]
 
-    # 3. Pixeldrain upload for split volume parts
-    if upload_parts_to_pd and telegram_archives:
+    # 2. Upload to Pixeldrain in background to prevent blocking archiving / Telegram uploader
+    if (upload_unsplit_to_pd or upload_parts_to_pd) and telegram_archives:
+        files_to_upload = telegram_archives if upload_parts_to_pd else [output_archive]
         log.info(
-            "Archive '%s' (%.2f GB) is split. Mirroring %d split volume parts to Pixeldrain...",
+            "Archive '%s' (%.2f GB) requires mirroring. Spawning background task to upload %d file(s) to Pixeldrain...",
             output_archive.name,
             archive_size / (1024**3),
-            len(telegram_archives)
+            len(files_to_upload)
         )
-        from ..uploader import upload_to_pixeldrain
-        domain = settings.pixeldrain_domain or "pixeldrain.com"
-        for part_path in telegram_archives:
-            try:
-                res, pd_logs = await upload_to_pixeldrain(part_path, api_key=settings.pixeldrain_api_key, domain=domain)
-                if isinstance(res, dict) and res.get("id"):
-                    pd_url = f"https://{domain}/u/{res['id']}"
-                    log.info("Successfully mirrored split volume '%s' to Pixeldrain: %s", part_path.name, pd_url)
-                    pd_links.append((part_path.name, pd_url))
-                else:
-                    log.warning("Pixeldrain upload response missing id for split volume %s: %s", part_path.name, res)
-            except Exception as pe:
-                log.exception("Failed to upload split volume %s to Pixeldrain: %s", part_path.name, pe)
+        pd_temp_dir = parent_dir / f"{folder_name}_pd_temp"
+        try:
+            pd_temp_dir.mkdir(parents=True, exist_ok=True)
+            copied_files = []
+            for p in files_to_upload:
+                copied_p = pd_temp_dir / p.name
+                shutil.copy2(p, copied_p)
+                copied_files.append(copied_p)
+
+            async def upload_bg():
+                from ..uploader import upload_to_pixeldrain
+                domain = settings.pixeldrain_domain or "pixeldrain.com"
+                for path in copied_files:
+                    try:
+                        res, pd_logs = await upload_to_pixeldrain(path, api_key=settings.pixeldrain_api_key, domain=domain)
+                        if isinstance(res, dict) and res.get("id"):
+                            pd_url = f"https://{domain}/u/{res['id']}"
+                            log.info("Successfully mirrored '%s' to Pixeldrain in background: %s", path.name, pd_url)
+                            if job_state is not None:
+                                job_state.pixeldrain_links.append((path.name, pd_url))
+                            else:
+                                pd_links.append((path.name, pd_url))
+                        else:
+                            log.warning("Pixeldrain upload response missing id in background for %s: %s", path.name, res)
+                    except Exception as pe:
+                        log.exception("Failed to upload %s to Pixeldrain in background: %s", path.name, pe)
+                
+                try:
+                    shutil.rmtree(pd_temp_dir, ignore_errors=True)
+                except Exception:
+                    pass
+
+            asyncio.create_task(upload_bg())
+        except Exception as e:
+            log.exception("Failed to initialize background Pixeldrain upload: %s", e)
 
     shutil.rmtree(folder_path, ignore_errors=True)
     log.info("Successfully archived '%s' into %d Telegram file(s). Original folder deleted.", folder_name, len(telegram_archives))
@@ -179,7 +186,8 @@ async def archive_folder_async(
 async def archive_all_folders_in_dir(
     target_dir: Path,
     archive_format: str = "zip",
-    mirror_pixeldrain: bool = False
+    mirror_pixeldrain: bool = False,
+    job_state = None
 ) -> tuple[list[Path], list[tuple[str, str]]]:
     """Iterates through target_dir and archives each folder individually.
     
@@ -197,7 +205,7 @@ async def archive_all_folders_in_dir(
 
     for item in subdirs:
         archives, pd_links = await archive_folder_async(
-            item, archive_format=archive_format, mirror_pixeldrain=mirror_pixeldrain
+            item, archive_format=archive_format, mirror_pixeldrain=mirror_pixeldrain, job_state=job_state
         )
         final_paths.extend(archives)
         all_pd_links.extend(pd_links)
@@ -212,7 +220,7 @@ async def archive_all_folders_in_dir(
                 log.warning("Could not move %s into %s: %s", f.name, top_files_dir.name, e)
 
         archives, pd_links = await archive_folder_async(
-            top_files_dir, archive_format=archive_format, mirror_pixeldrain=mirror_pixeldrain
+            top_files_dir, archive_format=archive_format, mirror_pixeldrain=mirror_pixeldrain, job_state=job_state
         )
         final_paths.extend(archives)
         all_pd_links.extend(pd_links)

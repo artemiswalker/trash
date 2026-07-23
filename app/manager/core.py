@@ -434,6 +434,7 @@ class QueueManager:
                             dest_dir,
                             archive_format=archive_fmt,
                             mirror_pixeldrain=mirror_pixeldrain,
+                            job_state=job_state,
                         )
                         if _pd_links:
                             job_state.pixeldrain_links.extend(_pd_links)
